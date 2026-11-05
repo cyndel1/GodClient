@@ -40,6 +40,16 @@ public:
 	
 	//-- used for adding strips from ribbon affectors
 	void addRibbonStrip (char const * debugName, const char* shaderTemplateName, real shaderSize, const stdvector<Vector>::fwd& pointList, const stdvector<Vector>::fwd& directionList, real velocity);
+
+	//-- run-time water (e.g. the God Client terrain editor): water added while a group id is set
+	//-- belongs to that group and can be removed again with removeGroup. Group 0 = permanent.
+	void setAddGroup (int group);
+	void removeGroup (int group);
+
+private:
+
+	void syncGroups ();
+
 private:
 
 	ClientLocalWaterManager (const ClientLocalWaterManager& rhs);
@@ -61,6 +71,9 @@ private:
 	const Appearance&         m_appearance;
 	LocalShaderPrimitiveDefaultList* m_localShaderPrimitiveDefaultList;
 	LocalShaderPrimitiveRibbonStripList* m_localShaderPrimitiveRibbonStripList;
+	stdvector<int>::fwd*      m_groupList;   // group of each entry in m_localShaderPrimitiveDefaultList
+	stdvector<int>::fwd*      m_ribbonGroupList;   // group of each entry in m_localShaderPrimitiveRibbonStripList
+	int                       m_addGroup;
 };
 
 //===================================================================

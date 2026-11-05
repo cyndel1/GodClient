@@ -1308,6 +1308,11 @@ void ProceduralTerrainAppearance::createFlora (const Chunk* const chunk)
 	iter = m_cachedFloraMap->find (key);
 	if (iter != m_cachedFloraMap->end ())
 	{
+		//-- the baked height may have changed since the object was cached (run-time terrain edits)
+		Vector cachedPosition = iter->second->getPosition_p ();
+		cachedPosition.y = proceduralTerrainAppearanceTemplate->getStaticCollidableFloraHeight (keyX, keyZ);
+		iter->second->setPosition_p (cachedPosition);
+
 		iter->second->addToWorld ();
 		IGNORE_RETURN (m_floraMap->insert (std::make_pair (key, iter->second)));
 

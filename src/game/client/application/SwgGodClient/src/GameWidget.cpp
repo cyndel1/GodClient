@@ -1134,12 +1134,17 @@ void GameWidget::mousePressEvent(QMouseEvent*mouseEvent)
 		m_mouseDownPoint = m_lastMousePoint = mouseEvent->pos();
 
 		//-- terrain editor brush: left = paint, right = alternate (or pick a height). Alt still drives the camera.
-		if(TerrainEditData::getInstance().isBrushMode() && m_gs && !hasState(mouseEvent, Qt::AltButton) &&
+		if(TerrainEditData::getInstance().isBrushMode() && !m_gs)
+			TerrainEditData::getInstance().logEvent("BRUSH ignored: the game window has no ground scene");
+
+		if(TerrainEditData::getInstance().isBrushMode() && m_gs &&!hasState(mouseEvent, Qt::AltButton) &&
 			(mouseEvent->button() == Qt::LeftButton || mouseEvent->button() == Qt::RightButton))
 		{
 			Vector2d brushPoint;
 			if(getTerrainBrushPoint(mouseEvent->x(), mouseEvent->y(), brushPoint))
 				IGNORE_RETURN(TerrainEditData::getInstance().beginStroke(brushPoint, mouseEvent->button() == Qt::RightButton));
+			else
+				TerrainEditData::getInstance().logEvent("BRUSH no ground found under the cursor at %d, %d", mouseEvent->x(), mouseEvent->y());
 
 			m_rubberBanding = false;
 			m_rubberBandOk  = false;

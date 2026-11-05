@@ -489,6 +489,31 @@ void ProceduralTerrainAppearanceTemplate::createWaterTableAndRibbonQuadLists ()
 
 //-------------------------------------------------------------------
 
+void ProceduralTerrainAppearanceTemplate::setStaticCollidableFloraMaps (const int* const familyIds, const float* const heights)
+{
+	const int width = getMapWidthInFlora ();
+	if (!familyIds || !heights || width <= 0)
+		return;
+
+	PackedIntegerMap* const newFamilies = new PackedIntegerMap (width, width, familyIds);
+	PackedFixedPointMap* const newHeights = new PackedFixedPointMap (width, width, 1.0f / 32.0f, heights);
+
+	delete m_staticCollidableFloraMap;
+	m_staticCollidableFloraMap = newFamilies;
+	delete m_staticCollidableFloraHeightMap;
+	m_staticCollidableFloraHeightMap = newHeights;
+}
+
+//-------------------------------------------------------------------
+
+void ProceduralTerrainAppearanceTemplate::rebuildWaterTables ()
+{
+	if (m_terrainGenerator && m_waterTableList && m_ribbonQuadList && m_ribbonEndCapList)
+		createWaterTableAndRibbonQuadLists ();
+}
+
+//-------------------------------------------------------------------
+
 bool ProceduralTerrainAppearanceTemplate::getWaterHeight (const Vector& position, float& height) const
 {
 	TerrainGeneratorWaterType waterType;

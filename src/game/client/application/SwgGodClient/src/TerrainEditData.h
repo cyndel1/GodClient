@@ -49,14 +49,54 @@ public:
 		T_flatten,
 		T_level,
 		T_paint,        // stamp a ground texture (shader family)
-		T_clearFlora    // remove trees, rocks, bushes and grass
+		T_clearFlora,   // remove trees, rocks, bushes and grass
+		T_roughen,      // add natural bumps from one of the planet's fractal patterns
+		T_terrace,      // turn slopes into steps
+		T_plantFlora,   // add bushes / rocks (static flora) or grass (radial flora)
+		T_road,         // draw a path: follows the ground, smoothed, with a road texture
+		T_river,        // draw a path: carves a channel and fills it with water
+		T_water,        // flat water (lake / pond) at the Flatten/Level height, inside a shape
+		T_smooth        // soften bumps: the ground is sampled, blurred and baked when the drag ends
 	};
 
 	enum StrokeKind
 	{
 		SK_height,
 		SK_paint,
-		SK_flora
+		SK_flora,
+		SK_roughen,
+		SK_terrace,
+		SK_plant,
+		SK_road,
+		SK_river,
+		SK_water,
+		SK_smooth,      // m_samples.points = (x, target height, z) per terrain pole; m_param2 = half patch size
+		SK_tree         // trees in the baked flora map: m_treeTiles; the layer is an empty marker
+	};
+
+	//-- how a drag is turned into an area. Brush = along the drag; the others fill a shape
+	//-- (the drag sets two corners, the centre and radius, or the outline). Roads/rivers are always paths.
+	enum Shape
+	{
+		SH_brush,
+		SH_rectangle,
+		SH_circle,
+		SH_polygon
+	};
+
+	//-- ground heights sampled along a road/river path before it was added (like SOE's Terrain
+	//-- Editor "bake"), so the same path can be rebuilt identically for undo/redo/save
+	struct PathSamples
+	{
+		std::vector<Vector> points;   // x, ground height, z
+		std::vector<int>    counts;   // samples per path segment
+	};
+
+	enum PlantKind
+	{
+		PK_static,      // FloraGroup family: bushes, rocks (static non-collidable flora)
+		PK_radial,      // RadialGroup family: grass and small plants (dynamic near flora)
+		PK_tree         // FloraGroup family placed in the .trn's baked tree map (one per 16 m tile)
 	};
 
 	enum Status
@@ -90,6 +130,42 @@ public:
 	int         getShaderFamilyId (int index);
 	const char *getShaderFamilyName (int familyId);
 
+	//-- Roughen: one of the planet's fractal patterns, and how many metres of bumps
+	int         getNumberOfFractalFamilies ();
+	int         getFractalFamilyId (int index);
+	const char *getFractalFamilyName (int familyId);
+	void        setRoughenFamily (int familyId);
+	int         getRoughenFamily () const;
+	void        setRoughness (float metres);
+	float       getRoughness () const;
+
+	//-- Terrace: step height and the flat part of each step (0..1)
+	void        setTerraceStep (float metres);
+	float       getTerraceStep () const;
+	void        setTerraceFlat (float fraction);
+	float       getTerraceFlat () const;
+
+	//-- Plant flora: static families first, then radial families
+	int         getNumberOfPlantChoices ();
+	bool        getPlantChoice (int index, PlantKind & kind, int & familyId);
+	const char *getPlantName (PlantKind kind, int familyId);
+	void        setPlant (PlantKind kind, int familyId);
+	PlantKind   getPlantKind () const;
+	int         getPlantFamily () const;
+	void        setPlantDensity (float density);   // 0..1
+	float       getPlantDensity () const;
+
+	//-- River: channel depth below the bank (metres); water sits about 30% of the way down
+	//-- Smooth: how far each stroke moves the ground towards the blurred ground (0..1)
+	void        setSmoothStrength (float fraction);
+	float       getSmoothStrength () const;
+
+	void        setRiverDepth (float metres);
+	float       getRiverDepth () const;
+
+	void        setShape (Shape shape);
+	Shape       getShape () const;
+
 	void        setBrushMode (bool on);
 	bool        isBrushMode () const;
 
@@ -120,6 +196,8 @@ public:
 	//-- details to terrain_edit_log.txt in the client folder. Returns a short summary.
 	void        diagnoseLastEdit (char * summary, int summarySize);
 	void        logStall (unsigned long milliseconds);   // called by the panel when its timer fires late
+	void        logEvent (const char * format, ...) const;   // timestamped line in terrain_edit_log.txt
+	bool        takeMessage (std::string & message);         // a note for the panel since the last call
 
 	//-- saving. Every save writes: the planet's .trn as it was when this session first saved
 	//-- (kept in memory) + the session's current strokes. Building-flattening layers that the
@@ -147,15 +225,41 @@ private:
 		float                     m_radius;
 		float                     m_feather;
 		int                       m_strokeId;     // unique id; flora strokes use it for their clear-flora keys
+		float                     m_param;        // roughen: metres; terrace: step; plant: density
+		float                     m_param2;       // terrace: flat fraction
+		int                       m_subKind;      // plant: PlantKind
+		PathSamples               m_samples;      // road / river
+		std::string               m_waterShader;  // river, water
+		Shape                     m_shape;        // SH_brush: m_points is the path; otherwise the closed outline
+		PointList                 m_floraPoints;  // flora strokes: centres of the clear-flora circles
+		float                     m_floraRadius;
+		std::vector<int>          m_treeTiles;       // tree strokes: baked-map tile index (z * width + x), all empty before
+		std::vector<float>        m_treeHeights;     // tree strokes: baked tree height per tile
+		std::vector<float>        m_treeOldHeights;  // tree strokes: the tile's baked height before
 	};
 
 	typedef std::vector<Edit>                      EditList;
 	typedef std::vector<TerrainGenerator::Layer *> LayerList;
 
 	void        logStroke (const Edit & edit) const;
-	void        logEvent (const char * format, ...) const;
 
-	static TerrainGenerator::Layer * createLayer (const char * name, const PointList & points, StrokeKind kind, TerrainGeneratorOperation operation, float height, int familyId, float radius, float feather);
+	static TerrainGenerator::Layer * createLayer (const char * name, const PointList & points, StrokeKind kind, TerrainGeneratorOperation operation, float height, int familyId, float radius, float feather, float param, float param2, int subKind, const PathSamples & samples, const char * waterShader, Shape shape);
+	static PointList                 buildOutline (Shape shape, const PointList & dragPoints);
+	static PointList                 coverPoints (const PointList & outline, float & radius);
+	static bool                      isInsidePolygon (const Vector2d & point, const PointList & outline);
+	void                             refreshSwimWater ();
+	bool                             bakeSmooth ();
+	bool                             loadTreeMaps ();
+	void                             resnapTrees (const Rectangle2d & area);   // baked tree heights := current ground
+	static bool                      changesHeight (StrokeKind kind);
+	bool                             bakeTrees ();
+	void                             setTreeTiles (const std::vector<int> & tiles, int familyId, const std::vector<float> & heights);
+	static TerrainGenerator::Layer * createSmoothLayer (const char * name, const PathSamples & samples, float halfPatch);
+	static TerrainGenerator::Layer * createPathLayer (const char * name, const PointList & points, StrokeKind kind, int familyId, float radius, float feather, float depth, const PathSamples & samples, const char * waterShader);
+	static PointList                 smoothPath (const PointList & points, float spacing, int passes);
+	void                             samplePath (const PointList & points, PathSamples & samples);
+	std::string                      findWaterShader ();
+	const TerrainGenerator *         getGenerator ();
 
 	//-- trees and rocks on most planets come from the .trn's baked flora map, not from terrain
 	//-- rules, so Clear flora also uses the engine's run-time "clear collidable flora" circles
@@ -198,6 +302,18 @@ private:
 	float       m_levelHeight;
 	bool        m_flattenNeedsSample;
 	int         m_paintFamilyId;
+	int         m_roughenFamilyId;
+	float       m_roughness;
+	float       m_terraceStep;
+	float       m_terraceFlat;
+	PlantKind   m_plantKind;
+	int         m_plantFamilyId;
+	float       m_plantDensity;
+	float       m_riverDepth;
+	float       m_smoothStrength;
+	std::string m_waterShader;      // water shader used by River strokes (found on the planet)
+	Shape       m_shape;
+	std::string m_message;          // for the panel (takeMessage)
 	bool        m_brushMode;
 
 	//-- the terrain the edits belong to
@@ -210,7 +326,25 @@ private:
 	StrokeKind                m_strokeKind;
 	int                       m_strokeFamilyId;
 	std::string               m_strokeFamilyName;
+	float                     m_strokeParam;
+	float                     m_strokeParam2;
+	int                       m_strokeSubKind;
+	PathSamples               m_strokeSamples;
 	int                       m_strokeFloraPointsCleared;   // flora strokes: points already given clear circles
+	Shape                     m_strokeShape;
+	std::vector<int>          m_strokeTreeTiles;
+	std::vector<float>        m_strokeTreeHeights;
+	std::vector<float>        m_strokeTreeOldHeights;
+
+	//-- the baked tree maps of the current terrain, unpacked (loaded on first use, kept in step
+	//-- with the template's maps, which only this tool changes)
+	int                       m_treeMapWidth;      // 0 = not loaded
+	std::vector<int>          m_treeFamilies;
+	std::vector<float>        m_treeHeightMap;
+	std::vector<int>          m_bakedTreeList;     // tree families used in the baked map, for the Plant picker
+	bool                      m_bakedTreeListBuilt;
+	PointList                 m_strokeFloraPoints;          // shape flora strokes: clear-flora circle centres
+	float                     m_strokeFloraRadius;
 	float                     m_strokeHeight;
 	TerrainGeneratorOperation m_strokeOperation;
 	PointList                 m_strokePoints;

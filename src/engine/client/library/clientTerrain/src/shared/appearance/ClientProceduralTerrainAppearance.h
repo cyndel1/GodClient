@@ -431,6 +431,11 @@ public:
 	const EnvironmentBlock* getCurrentEnvironmentBlock () const;
 	const InteriorEnvironmentBlock* getCurrentInteriorEnvironmentBlock () const;
 
+	//-- run-time water for layers added while playing (local water tables, rivers). The group id
+	//-- (non-zero) identifies the water so it can be removed again.
+	void                 addRunTimeWater (const TerrainGenerator::Layer* layer, int group);
+	void                 removeRunTimeWater (int group);
+
 	void                 setChunkLotShader (int chunkX, int chunkZ, const Shader* lotShader) const;
 	void                 clearLotShaders ();
 

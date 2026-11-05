@@ -993,6 +993,13 @@ void ClientProceduralTerrainAppearance::retrieveCompletedChunkCreationRequests (
 						node->addChunk (requestInfo.m_chunk, requestInfo.m_size);
 					}
 
+					//-- Re-create trees from the baked flora map (deleting the old chunks took theirs out of
+					//-- the world; normal chunk creation does this too). Done after ALL old chunks are gone:
+					//-- deleting a larger old chunk removes any tree inside it, including one a smaller
+					//-- new chunk had already re-created. Without this, rebuilt areas lost their trees.
+					for (iter = m_completedChunkRequestInfoList->begin (); iter != end; ++iter)
+						createFlora (iter->m_chunk);
+
 					//-- Clear lists
 					m_completedChunkRequestInfoList->clear ();
 					m_invalidateChunkRequestInfoList->clear ();

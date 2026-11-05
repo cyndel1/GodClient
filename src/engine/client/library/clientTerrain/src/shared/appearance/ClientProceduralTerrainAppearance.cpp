@@ -1740,6 +1740,26 @@ void ClientProceduralTerrainAppearance::removeClearNonCollidableFloraObject (con
 
 //-------------------------------------------------------------------
 
+void ClientProceduralTerrainAppearance::addRunTimeWater (const TerrainGenerator::Layer* const layer, const int group)
+{
+	if (!layer || !m_localWaterManager || group == 0)
+		return;
+
+	m_localWaterManager->setAddGroup (group);
+	buildLocalWaterTable (layer);
+	m_localWaterManager->setAddGroup (0);
+}
+
+//-------------------------------------------------------------------
+
+void ClientProceduralTerrainAppearance::removeRunTimeWater (const int group)
+{
+	if (m_localWaterManager && group != 0)
+		m_localWaterManager->removeGroup (group);
+}
+
+//-------------------------------------------------------------------
+
 void ClientProceduralTerrainAppearance::setChunkLotShader (const int chunkX, const int chunkZ, const Shader* lotShader) const
 {
 	ClientChunk* chunk = const_cast<ClientChunk*> (safe_cast<const ClientChunk*> (findChunk (chunkX, chunkZ, 1)));

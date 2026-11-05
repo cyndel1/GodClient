@@ -772,7 +772,10 @@ ClientLocalWaterManager::ClientLocalWaterManager (const Appearance& appearance) 
 	WaterManager (),
 	m_appearance (appearance),
 	m_localShaderPrimitiveDefaultList (0),
-	m_localShaderPrimitiveRibbonStripList (0)
+	m_localShaderPrimitiveRibbonStripList (0),
+	m_groupList (new std::vector<int>),
+	m_ribbonGroupList (new std::vector<int>),
+	m_addGroup (0)
 {
 #ifdef _DEBUG
 	DebugFlags::registerFlag(ms_noRenderWater, "ClientTerrain", "noRenderLocalWater");
@@ -801,6 +804,67 @@ ClientLocalWaterManager::~ClientLocalWaterManager ()
 
 	delete m_localShaderPrimitiveRibbonStripList;
 	m_localShaderPrimitiveRibbonStripList = 0;
+
+	delete m_groupList;
+	m_groupList = 0;
+
+	delete m_ribbonGroupList;
+	m_ribbonGroupList = 0;
+}
+
+//-------------------------------------------------------------------
+
+void ClientLocalWaterManager::syncGroups ()
+{
+	//-- entries added since the last sync belong to the group that was active while they were added
+	while (m_groupList->size () < m_localShaderPrimitiveDefaultList->size ())
+		m_groupList->push_back (m_addGroup);
+	while (m_ribbonGroupList->size () < m_localShaderPrimitiveRibbonStripList->size ())
+		m_ribbonGroupList->push_back (m_addGroup);
+}
+
+//-------------------------------------------------------------------
+
+void ClientLocalWaterManager::setAddGroup (const int group)
+{
+	syncGroups ();
+	m_addGroup = group;
+}
+
+//-------------------------------------------------------------------
+
+void ClientLocalWaterManager::removeGroup (const int group)
+{
+	syncGroups ();
+
+	if (group == 0)
+		return;
+
+	uint i = 0;
+	while (i < m_localShaderPrimitiveDefaultList->size ())
+	{
+		if ((*m_groupList) [i] == group)
+		{
+			delete (*m_localShaderPrimitiveDefaultList) [i];
+			IGNORE_RETURN (m_localShaderPrimitiveDefaultList->erase (m_localShaderPrimitiveDefaultList->begin () + static_cast<int> (i)));
+			IGNORE_RETURN (m_groupList->erase (m_groupList->begin () + static_cast<int> (i)));
+		}
+		else
+			++i;
+	}
+
+	i = 0;
+	while (i < m_localShaderPrimitiveRibbonStripList->size ())
+	{
+		if ((*m_ribbonGroupList) [i] == group)
+		{
+			delete (*m_localShaderPrimitiveRibbonStripList) [i];
+			IGNORE_RETURN (m_localShaderPrimitiveRibbonStripList->erase (m_localShaderPrimitiveRibbonStripList->begin () + static_cast<int> (i)));
+			IGNORE_RETURN (m_ribbonGroupList->erase (m_ribbonGroupList->begin () + static_cast<int> (i)));
+		}
+		else
+			++i;
+	}
 }
 
 //-------------------------------------------------------------------

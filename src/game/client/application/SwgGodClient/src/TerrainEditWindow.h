@@ -45,6 +45,15 @@ public slots:
 	void onStrengthChanged (const QString & text);
 	void onLevelHeightChanged (const QString & text);
 	void onPaintFamilyActivated (int index);
+	void onFractalActivated (int index);
+	void onRoughnessChanged (const QString & text);
+	void onTerraceStepChanged (const QString & text);
+	void onTerraceFlatChanged (int value);
+	void onPlantActivated (int index);
+	void onPlantDensityChanged (int value);
+	void onRiverDepthChanged (const QString & text);
+	void onShapeActivated (int index);
+	void onSmoothStrengthChanged (int value);
 	void onUndo ();
 	void onRedo ();
 	void onRemoveAll ();
@@ -72,6 +81,18 @@ private:
 	QComboBox *    m_paintFamily;
 	std::vector<int> m_familyIds;      // shader family id for each entry in m_paintFamily
 	QString        m_familyPlanet;     // planet the list was built for
+	QComboBox *    m_fractal;
+	std::vector<int> m_fractalIds;
+	QLineEdit *    m_roughness;
+	QLineEdit *    m_terraceStep;
+	QSpinBox *     m_terraceFlat;
+	QComboBox *    m_plant;
+	std::vector<int> m_plantKinds;
+	std::vector<int> m_plantIds;
+	QSpinBox *     m_plantDensity;
+	QLineEdit *    m_riverDepth;
+	QComboBox *    m_shape;
+	QSpinBox *     m_smoothStrength;
 	QLabel *       m_status;
 	QListBox *     m_editList;
 	QPushButton *  m_undo;
