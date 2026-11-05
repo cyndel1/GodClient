@@ -216,8 +216,11 @@ m_callbackReceiverExpMonitor (0)
 	getCodeDataObject (TUICheckbox, checkbox, "checkDoubleToolbar");
 	registerCheckbox (*checkbox, CuiPreferences::setUseDoubleToolbar, CuiPreferences::getUseDoubleToolbar, SwgCuiOptBase::getFalse);
 
-	getCodeDataObject(TUICheckbox, checkbox, "checkShowToolbarCommandCooldownTimer");
-	registerCheckbox(*checkbox, CuiPreferences::setShowToolbarCooldownTimer, CuiPreferences::getShowToolbarCooldownTimer, SwgCuiOptBase::getFalse);
+	//-- optional: older UI data has no cooldown-timer checkbox (it used to FATAL when Options opened)
+	checkbox = 0;
+	getCodeDataObject(TUICheckbox, checkbox, "checkShowToolbarCommandCooldownTimer", true);
+	if (checkbox)
+		registerCheckbox(*checkbox, CuiPreferences::setShowToolbarCooldownTimer, CuiPreferences::getShowToolbarCooldownTimer, SwgCuiOptBase::getFalse);
 	
 	getCodeDataObject (TUICheckbox, checkbox, "checkLocationDisplay");
 	registerCheckbox (*checkbox, CuiPreferences::setLocationDisplayEnabled, CuiPreferences::getLocationDisplayEnabled, SwgCuiOptBase::getTrue);

@@ -278,10 +278,11 @@ void FileManifest::addNewManifestEntry(const char *fileName, int fileSize)
 		if (fileSize)
 			((insertReturn.first)->second)->size = fileSize;
 
-		// delete the new entry we created
+		// delete the new entry we created (the map already owns an entry for this file)
 		delete entry;
 	}
-	delete entry;
+	// otherwise the map now owns 'entry'; FileManifest::remove() deletes it at shutdown.
+	// (An unconditional 'delete entry' here caused a double free / heap corruption.)
 #else
 	return;
 #endif
@@ -300,7 +301,11 @@ void FileManifest::addStoredManifestEntry(const char *fileName, const char * sce
 
 	std::pair<ManifestMap::iterator, bool> insertReturn = s_manifest.insert(std::pair<const uint32, FileManifestEntry*>(crc, entry));
 
-	delete entry;
+	// only delete the entry if the map already had one for this file; otherwise the map owns it
+	// and FileManifest::remove() deletes it at shutdown. (Deleting it unconditionally left a
+	// dangling pointer in the map: heap corruption while playing and a double free on exit.)
+	if (!insertReturn.second)
+		delete entry;
 }
 
 // -----------------------------------------------------------------------

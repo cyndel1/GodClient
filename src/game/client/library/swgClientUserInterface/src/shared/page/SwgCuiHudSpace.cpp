@@ -128,8 +128,10 @@ SwgCuiHudSpace::SwgCuiHudSpace(UIPage & page) :
 
 	// by default keep the atmospheric flight "enterSpaceButton" off when launching into space
 	// this can be adjusted to toggle specifically for atmospheric flight later 
-	getCodeDataObject(TUIButton, m_enterSpaceButton, "buttonEnterSpace");
-	m_enterSpaceButton->SetVisible(false);
+	//-- optional: older UI data has no atmospheric-flight button
+	getCodeDataObject(TUIButton, m_enterSpaceButton, "buttonEnterSpace", true);
+	if (m_enterSpaceButton)
+		m_enterSpaceButton->SetVisible(false);
 		
 	m_buttonParentPage = NON_NULL(static_cast<UIPage*>(m_exitStationButton->GetParent(TUIPage))); //lint !e1774 // Could dynamic cast.
 	m_buttonParentPage->SetVisible(true);

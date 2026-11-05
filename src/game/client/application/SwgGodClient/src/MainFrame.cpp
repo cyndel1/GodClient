@@ -38,6 +38,7 @@
 #include "RegionBrowser.h"
 #include "ServerCommander.h"
 #include "ServerObjectData.h"
+#include "TerrainEditWindow.h"
 #include "TreeBrowser.h"
 
 #include <qaction.h>
@@ -91,6 +92,9 @@ MainFrame::MainFrame(QWidget *theParent, const char *theName)
   m_bookmarkBrowserDock(0),
   m_regionsViewDock(0),
   m_favoritesWindowDock(0),
+  m_terrainEditWindow(0),
+  m_terrainEditDock(0),
+  m_terrainEditAction(0),
   m_settings(0),
   m_actionsGame(0),
   m_actionsEdit(0),
@@ -201,6 +205,24 @@ MainFrame::MainFrame(QWidget *theParent, const char *theName)
 		QMainWindow::addDockWindow(m_regionsViewDock, Qt::TornOff);
 		m_regionsViewDock->setCloseMode(QDockWindow::Always);
 		m_regionsViewDock->hide();
+
+		//-- in-game terrain editor (Window -> Terrain Editor)
+		m_terrainEditDock   = new QDockWindow(QDockWindow::InDock, this, "Terrain Editor");
+		m_terrainEditWindow = new TerrainEditWindow(m_terrainEditDock, "Terrain Editor Widget");
+		m_terrainEditDock->setWidget(m_terrainEditWindow);
+		m_terrainEditDock->setResizeEnabled(true);
+		m_terrainEditDock->setCaption("Terrain Editor");
+		QMainWindow::addDockWindow(m_terrainEditDock, Qt::Right);
+		m_terrainEditDock->setCloseMode(QDockWindow::Always);
+		m_terrainEditDock->show();   // open by default so the tool is easy to find
+
+		m_terrainEditAction = new QAction(this, "terrain_editor");
+		m_terrainEditAction->setText("Terrain Editor");
+		m_terrainEditAction->setMenuText("Te&rrain Editor (sculpt brushes)");
+		m_terrainEditAction->setToggleAction(true);
+		m_terrainEditAction->setOn(true);
+		IGNORE_RETURN(connect(m_terrainEditAction, SIGNAL(toggled(bool)), m_terrainEditDock, SLOT(setShown(bool))));
+		IGNORE_RETURN(connect(m_terrainEditDock, SIGNAL(visibilityChanged(bool)), m_terrainEditAction, SLOT(setOn(bool))));
 
 		//don't show the dock window list on right click (VERY annoying for some windows like the region viewer)
 		setDockMenuEnabled (false);
@@ -421,12 +443,15 @@ MainFrame::MainFrame(QWidget *theParent, const char *theName)
 			}
 
 			IGNORE_RETURN(m_terrainMenu->insertSeparator());
+			IGNORE_RETURN(m_terrainEditAction->addTo(m_terrainMenu));   // Game -> Terrain -> Terrain Editor
 
 			IGNORE_RETURN(ga->m_saveInteriorLayout->addTo(&m_menus.tool.menu));
 		}
 
 		//-- Tool menu stuff
 		{
+			IGNORE_RETURN(m_terrainEditAction->addTo                              (&m_menus.tool.menu));
+			IGNORE_RETURN(m_menus.tool.menu.insertSeparator());
 			IGNORE_RETURN(m_actionsTool->m_saveAsBrush->addTo                     (&m_menus.tool.menu));
 			IGNORE_RETURN(m_actionsTool->m_snapToGrid->addTo                      (&m_menus.tool.menu));
 			IGNORE_RETURN(m_actionsTool->m_sendSystemMessage->addTo               (&m_menus.tool.menu));
@@ -443,6 +468,7 @@ MainFrame::MainFrame(QWidget *theParent, const char *theName)
 			IGNORE_RETURN(m_actionsWindow->m_console->addTo          (&m_menus.window.menu));
 			IGNORE_RETURN(m_actionsWindow->m_gameWindow->addTo       (&m_menus.window.menu));
 			IGNORE_RETURN(m_actionsWindow->m_regionsView->addTo      (&m_menus.window.menu));
+			IGNORE_RETURN(m_terrainEditAction->addTo                 (&m_menus.window.menu));
 		}
 
 		//-- Script menu stuff

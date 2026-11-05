@@ -35,6 +35,8 @@ class ObjectEditor;
 class QDockWidget;
 class QSettings;
 class QWorkspace;
+class QAction;
+class TerrainEditWindow;
 class TreeBrowser;
 
 // ======================================================================
@@ -160,6 +162,10 @@ private:
 	QDockWindow*       m_bookmarkBrowserDock;
 	QDockWindow*       m_regionsViewDock;
 	QDockWindow*       m_favoritesWindowDock;
+
+	TerrainEditWindow* m_terrainEditWindow;
+	QDockWindow*       m_terrainEditDock;
+	QAction*           m_terrainEditAction;
 
 	QSettings*         m_settings;
 

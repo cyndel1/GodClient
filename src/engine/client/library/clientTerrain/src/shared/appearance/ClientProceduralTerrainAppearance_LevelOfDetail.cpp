@@ -992,6 +992,11 @@ void ClientProceduralTerrainAppearance::retrieveCompletedChunkCreationRequests (
 					m_requestThreadMode = RTM0_normal;
 					m_lockTerrainLevelOfDetail = false;
 
+					//-- The rebuilt chunks are new objects that the level of detail selection has not
+					//-- added to the world yet. Without this they stay invisible until the camera moves
+					//-- at least a metre (selection only re-runs when dirty or the camera moved).
+					m_levelOfDetail->setDirty (true);
+
 					//-- Resnap all flora to terrain
 					BoxExtent boxExtent;
 					boxExtent.setMin (Vector::negativeMaxXYZ);

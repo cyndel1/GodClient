@@ -104,6 +104,7 @@
 #include "ObjectTemplateData.h"
 #include "RecentDirectory.h"
 #include "ServerCommander.h"
+#include "TerrainEditData.h"
 
 //system includes
 #include <ctime>
@@ -152,6 +153,21 @@ namespace GameWidgetNamespace
 	template <typename T> inline bool hasStateAfter(const T* event, Qt::ButtonState state)
 	{
 		return(static_cast<size_t>(event->stateAfter()) & static_cast<size_t>(state)) != 0;
+	}
+
+	//-- terrain editor: the ground point (world x/z) under a screen position, outdoors only
+	bool getTerrainBrushPoint(const int screenX, const int screenY, Vector2d& point_w)
+	{
+		const CellProperty* cellProperty = CellProperty::getWorldCellProperty();
+		Vector intersection;
+		if(!GodClientData::getInstance().findIntersection_p(screenX, screenY, cellProperty, intersection))
+			return false;
+
+		if(cellProperty != CellProperty::getWorldCellProperty())
+			return false;
+
+		point_w = Vector2d(intersection.x, intersection.z);
+		return true;
 	}
 
 	inline bool isMiddleButtonMove(const QMouseEvent* mouseEvent)
@@ -776,6 +792,29 @@ void GameWidget::mouseMoveEvent(QMouseEvent*mouseEvent)
 	const QPoint pt(mouseEvent->pos());
 	GodClientData::getInstance().cursorScreenPositionChanged(pt.x(), pt.y());
 
+	//-- terrain editor brush: extend the stroke, or track the cursor for the height readout.
+	//-- Alt + mouse still moves the camera.
+	{
+		TerrainEditData& terrainEdit = TerrainEditData::getInstance();
+		if(terrainEdit.isBrushMode() && !hasState(mouseEvent, Qt::AltButton))
+		{
+			Vector2d brushPoint;
+			if(getTerrainBrushPoint(pt.x(), pt.y(), brushPoint))
+			{
+				if(terrainEdit.isStrokeActive())
+					terrainEdit.continueStroke(brushPoint);
+				else
+					terrainEdit.setCursor(brushPoint);
+			}
+
+			if(terrainEdit.isStrokeActive())
+			{
+				m_lastMousePoint = mouseEvent->pos();
+				return;
+			}
+		}
+	}
+
 	const real dx =(mouseEvent->x() - m_lastMousePoint.x())* CONST_REAL(0.01);
 	const real dy =(mouseEvent->y() - m_lastMousePoint.y())* CONST_REAL(0.01);
 
@@ -1094,6 +1133,20 @@ void GameWidget::mousePressEvent(QMouseEvent*mouseEvent)
 
 		m_mouseDownPoint = m_lastMousePoint = mouseEvent->pos();
 
+		//-- terrain editor brush: left = paint, right = alternate (or pick a height). Alt still drives the camera.
+		if(TerrainEditData::getInstance().isBrushMode() && m_gs && !hasState(mouseEvent, Qt::AltButton) &&
+			(mouseEvent->button() == Qt::LeftButton || mouseEvent->button() == Qt::RightButton))
+		{
+			Vector2d brushPoint;
+			if(getTerrainBrushPoint(mouseEvent->x(), mouseEvent->y(), brushPoint))
+				IGNORE_RETURN(TerrainEditData::getInstance().beginStroke(brushPoint, mouseEvent->button() == Qt::RightButton));
+
+			m_rubberBanding = false;
+			m_rubberBandOk  = false;
+			m_discardNextMouseRelease = true;   // keep the click from selecting objects
+			return;
+		}
+
 		//-- rubberbanding can only performed with the left mouse button, and
 		//-- only with no modifiers or either/both shift/control
 		NOT_NULL(m_keyStates);
@@ -1140,6 +1193,17 @@ void GameWidget::mousePressEvent(QMouseEvent*mouseEvent)
 void GameWidget::mouseReleaseEvent(QMouseEvent*mouseEvent)
 {
 	mouseEvent->accept();
+
+	//-- terrain editor brush: finish the stroke
+	if(TerrainEditData::getInstance().isStrokeActive() &&
+		(mouseEvent->button() == Qt::LeftButton || mouseEvent->button() == Qt::RightButton))
+	{
+		TerrainEditData::getInstance().endStroke();
+		m_discardNextMouseRelease = false;
+		m_rubberBanding = false;
+		m_rubberBandOk  = false;
+		return;
+	}
 
 	if(!isMiddleButtonActive(mouseEvent))
 		m_flyButtonDown = false;
@@ -1335,6 +1399,13 @@ void GameWidget::contextMenuEvent(QContextMenuEvent* evt)
 {
 	if(m_gameHasFocus || !m_gs)
 		return;
+
+	//-- the right button is the alternate brush while the terrain brush is on
+	if(TerrainEditData::getInstance().isBrushMode())
+	{
+		evt->accept();
+		return;
+	}
 
 	NOT_NULL(m_keyStates);
 	if((evt->state() & ~Qt::RightButton) != 0 || m_keyStates->hasAnyState()) //lint !e641 //enums

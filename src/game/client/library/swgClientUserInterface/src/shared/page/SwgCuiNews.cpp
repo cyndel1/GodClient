@@ -29,7 +29,7 @@ m_image           (0)
 {
 	getCodeDataObject (TUIButton,    m_buttonBack,    "buttonBack");
 	getCodeDataObject (TUIButton,    m_buttonNext,    "buttonNext");
-	getCodeDataObject (TUIButton,    m_buttonIntro,   "buttonIntro");
+	getCodeDataObject (TUIButton,    m_buttonIntro,   "buttonIntro", true);   // optional: missing in older UI data
 
 	getCodeDataObject (TUIText,      m_text,          "text");
 	getCodeDataObject (TUIImage,     m_image,         "image");
@@ -54,7 +54,8 @@ void SwgCuiNews::performActivate   ()
 {
 	m_buttonBack->AddCallback (this);
 	m_buttonNext->AddCallback (this);
-	m_buttonIntro->AddCallback (this);
+	if (m_buttonIntro)
+		m_buttonIntro->AddCallback (this);
 }
 
 //----------------------------------------------------------------------
@@ -63,7 +64,8 @@ void SwgCuiNews::performDeactivate ()
 {
 	m_buttonBack->RemoveCallback (this);
 	m_buttonNext->RemoveCallback (this);
-	m_buttonIntro->RemoveCallback (this);
+	if (m_buttonIntro)
+		m_buttonIntro->RemoveCallback (this);
 }
 
 //----------------------------------------------------------------------
