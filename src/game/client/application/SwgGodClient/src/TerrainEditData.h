@@ -25,10 +25,16 @@
 #include "sharedMath/Vector2d.h"
 #include "sharedTerrain/TerrainGenerator.h"
 
+#include "sharedMath/Vector.h"
+
+#include <map>
+#include <string>
 #include <vector>
 
 class AppearanceTemplate;
 class ClientProceduralTerrainAppearance;
+class Object;
+class PackedIntegerMap;
 
 // ======================================================================
 
@@ -41,7 +47,16 @@ public:
 		T_raise,
 		T_lower,
 		T_flatten,
-		T_level
+		T_level,
+		T_paint,        // stamp a ground texture (shader family)
+		T_clearFlora    // remove trees, rocks, bushes and grass
+	};
+
+	enum StrokeKind
+	{
+		SK_height,
+		SK_paint,
+		SK_flora
 	};
 
 	enum Status
@@ -67,6 +82,13 @@ public:
 	void        setLevelHeight (float height);    // also used as the sticky Flatten height
 	float       getLevelHeight () const;
 	bool        isFlattenHeightSet () const;      // false until the first Flatten stroke (or a pick) sets it
+	void        setPaintFamily (int familyId);    // shader family used by the Paint tool (0 = none chosen)
+	int         getPaintFamily () const;
+
+	//-- the current planet's ground textures (shader families), for the Paint picker
+	int         getNumberOfShaderFamilies ();
+	int         getShaderFamilyId (int index);
+	const char *getShaderFamilyName (int familyId);
 
 	void        setBrushMode (bool on);
 	bool        isBrushMode () const;
@@ -97,6 +119,7 @@ public:
 	//-- diagnostics: measures the generated ground along the newest stroke and writes
 	//-- details to terrain_edit_log.txt in the client folder. Returns a short summary.
 	void        diagnoseLastEdit (char * summary, int summarySize);
+	void        logStall (unsigned long milliseconds);   // called by the panel when its timer fires late
 
 	//-- saving. Every save writes: the planet's .trn as it was when this session first saved
 	//-- (kept in memory) + the session's current strokes. Building-flattening layers that the
@@ -116,19 +139,31 @@ private:
 	{
 		TerrainGenerator::Layer * m_layer;
 		Rectangle2d               m_extent;
-		PointList                 m_points;       // the stroke path, for diagnostics
-		TerrainGeneratorOperation m_operation;
-		float                     m_height;
+		PointList                 m_points;       // the stroke path (also used for saving)
+		StrokeKind                m_kind;
+		TerrainGeneratorOperation m_operation;    // height strokes
+		float                     m_height;       // height strokes
+		int                       m_familyId;     // paint strokes
 		float                     m_radius;
 		float                     m_feather;
+		int                       m_strokeId;     // unique id; flora strokes use it for their clear-flora keys
 	};
 
 	typedef std::vector<Edit>                      EditList;
 	typedef std::vector<TerrainGenerator::Layer *> LayerList;
 
 	void        logStroke (const Edit & edit) const;
+	void        logEvent (const char * format, ...) const;
 
-	static TerrainGenerator::Layer * createLayer (const char * name, const PointList & points, TerrainGeneratorOperation operation, float height, float radius, float feather);
+	static TerrainGenerator::Layer * createLayer (const char * name, const PointList & points, StrokeKind kind, TerrainGeneratorOperation operation, float height, int familyId, float radius, float feather);
+
+	//-- trees and rocks on most planets come from the .trn's baked flora map, not from terrain
+	//-- rules, so Clear flora also uses the engine's run-time "clear collidable flora" circles
+	void        addFloraClearing (int strokeId, const PointList & points, int firstPoint, float radius);
+	void        removeFloraClearing (int strokeId, int numberOfPoints);
+	void        refreshRadialFlora ();
+	void        diagnoseSurfaceEdit (const Edit & edit, char * summary, int summarySize);
+	PackedIntegerMap * buildClearedFloraMap (const PackedIntegerMap & original) const;
 	bool        loadOriginal (char * message, int messageSize);
 	bool        writeTerrain (const char * diskPath, char * message, int messageSize);
 
@@ -162,6 +197,7 @@ private:
 	float       m_strength;
 	float       m_levelHeight;
 	bool        m_flattenNeedsSample;
+	int         m_paintFamilyId;
 	bool        m_brushMode;
 
 	//-- the terrain the edits belong to
@@ -171,6 +207,10 @@ private:
 	//-- current stroke
 	bool                      m_strokeActive;
 	bool                      m_strokeInverted;
+	StrokeKind                m_strokeKind;
+	int                       m_strokeFamilyId;
+	std::string               m_strokeFamilyName;
+	int                       m_strokeFloraPointsCleared;   // flora strokes: points already given clear circles
 	float                     m_strokeHeight;
 	TerrainGeneratorOperation m_strokeOperation;
 	PointList                 m_strokePoints;
@@ -191,6 +231,15 @@ private:
 	bool        m_hasPendingDirty;
 	unsigned long m_lastFlushTime;
 
+	//-- diagnostics: is each requested rebuild actually carried out? (watches the on-screen
+	//-- chunk under the middle of the rebuilt area and logs when it is replaced)
+	unsigned long m_pendingSince;
+	bool          m_pendingWaitLogged;
+	bool          m_watching;
+	const void *  m_watchChunk;
+	Vector2d      m_watchPoint;
+	unsigned long m_watchTime;
+
 	//-- when the terrain worker last became idle (0 = busy). Growing the engine's layer list
 	//-- frees its old memory block while the worker may be reading it, so routine layer swaps
 	//-- only happen while the worker is idle.
@@ -201,6 +250,20 @@ private:
 	//-- cursor
 	Vector2d    m_cursor;
 	bool        m_hasCursor;
+
+	//-- diagnostics: what the tool last did, for stall reports
+	const char *  m_lastAction;
+	unsigned long m_lastActionTime;
+	int           m_lastActionCount;
+
+	//-- grass, bushes and small rocks: one engine "clear non-collidable flora" object per stroke point
+	struct RadialClear
+	{
+		Object *                                 m_object;
+		std::vector<std::pair<Vector, float> > * m_list;
+	};
+	typedef std::map<int, RadialClear> RadialClearMap;
+	RadialClearMap m_radialClears;
 
 	//-- saving
 	TerrainGenerator * m_originalGenerator;   // the planet's rules as on disk at the first save (no run-time layers)

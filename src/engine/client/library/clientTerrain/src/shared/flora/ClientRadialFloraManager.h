@@ -51,6 +51,7 @@ public:
 
 	void markExtentDirty (const BoxExtent* boxExtent);
 	void markRegionDirty (const Rectangle2d& rectangle);
+	void markRegionReplant (const Rectangle2d& rectangle);   // re-decide every piece of flora in the area (terrain rules changed there)
 
 	bool isEnabled () const;
 	const ClientProceduralTerrainAppearance &getTerrainAppearance() const { return m_terrainAppearance; }
@@ -130,6 +131,7 @@ protected:
 
 	void clearRegionList () const;
 	bool isWithinDirtyRegion (float x, float y) const;
+	bool isWithinReplantRegion (float x, float y) const;
 
 	void update (const Vector& origin) const;
 
@@ -169,6 +171,7 @@ protected:
 	uint32                                   m_seed;
 
 	mutable RegionList                       m_regionList;
+	mutable RegionList                       m_replantRegionList;
 	mutable RadialNodeList                   m_radialNodeList;
 	
 	mutable Vector                           m_oldOrigin;

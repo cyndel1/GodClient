@@ -399,6 +399,16 @@ void ClientRadialFloraManager::markRegionDirty (const Rectangle2d& rectangle)
 
 //-------------------------------------------------------------------
 
+void ClientRadialFloraManager::markRegionReplant (const Rectangle2d& rectangle)
+{
+	//-- the terrain rules changed in this area (e.g. a run-time edit), so flora already planted
+	//-- there must be decided again; markRegionDirty alone only re-snaps it to the ground height
+	m_replantRegionList.push_back (rectangle);
+	m_regionList.push_back (rectangle);
+}
+
+//-------------------------------------------------------------------
+
 void ClientRadialFloraManager::markExtentDirty (const BoxExtent* const extent)
 {
 	NOT_NULL (extent);
@@ -594,6 +604,18 @@ ClientRadialFloraManager::RadialNode* ClientRadialFloraManager::createRadialNode
 void ClientRadialFloraManager::clearRegionList () const
 {
 	m_regionList.clear ();
+	m_replantRegionList.clear ();
+}
+
+//-------------------------------------------------------------------
+
+bool ClientRadialFloraManager::isWithinReplantRegion (float x, float y) const
+{
+	for (RegionList::iterator iterator = m_replantRegionList.begin (); iterator != m_replantRegionList.end (); ++iterator)
+		if ((*iterator).isWithin (x, y))
+			return true;
+
+	return false;
 }
 
 //-------------------------------------------------------------------
@@ -674,8 +696,9 @@ void ClientRadialFloraManager::update (const Vector& origin) const
 
 		DEBUG_FATAL(!ri->floraAllowed && ri->hasFlora, ("Node has flora when its not allowed."));
 
-		//-- see if we need to replace a RadialNode
-		if (outsideCircle || !ri->floraAllowed)
+		//-- see if we need to replace a RadialNode (also when the terrain rules under it changed)
+		const bool replant = !outsideCircle && !m_replantRegionList.empty () && isWithinReplantRegion (ri->position_x, ri->position_z);
+		if (outsideCircle || !ri->floraAllowed || replant)
 		{
 			if (outsideCircle)
 			{

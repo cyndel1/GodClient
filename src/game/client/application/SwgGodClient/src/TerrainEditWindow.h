@@ -10,10 +10,14 @@
 
 // ======================================================================
 
+#include <qstring.h>
 #include <qwidget.h>
+
+#include <vector>
 
 class QButtonGroup;
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListBox;
@@ -40,6 +44,7 @@ public slots:
 	void onFeatherChanged (int value);
 	void onStrengthChanged (const QString & text);
 	void onLevelHeightChanged (const QString & text);
+	void onPaintFamilyActivated (int index);
 	void onUndo ();
 	void onRedo ();
 	void onRemoveAll ();
@@ -64,6 +69,9 @@ private:
 	QSpinBox *     m_feather;
 	QLineEdit *    m_strength;
 	QLineEdit *    m_levelHeight;
+	QComboBox *    m_paintFamily;
+	std::vector<int> m_familyIds;      // shader family id for each entry in m_paintFamily
+	QString        m_familyPlanet;     // planet the list was built for
 	QLabel *       m_status;
 	QListBox *     m_editList;
 	QPushButton *  m_undo;

@@ -21,7 +21,11 @@
 #include "sharedUtility/LocalMachineOptionManager.h"
 #include "sharedFoundation/Os.h"
 
+#include "sharedMath/Rectangle2d.h"
+#include "sharedMath/Vector2d.h"
+
 #include <algorithm>
+#include <cfloat>
 #include <map>
 
 // ======================================================================
@@ -967,12 +971,17 @@ void ClientProceduralTerrainAppearance::retrieveCompletedChunkCreationRequests (
 					DEBUG_FATAL (m_completedChunkRequestInfoList->size () != m_invalidateChunkRequestInfoList->size (), ("race condition detected in terrain generation thread: m_completedChunkRequestInfoList->size () != m_invalidateChunkRequestInfoList->size ()"));
 
 					//-- Replace the portions of the tree that were just built
+					Rectangle2d rebuiltArea (FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX);
 					ChunkRequestInfoList::const_iterator iter = m_completedChunkRequestInfoList->begin ();
 					ChunkRequestInfoList::const_iterator end = m_completedChunkRequestInfoList->end ();
 					for (; iter != end; ++iter)
 					{
 						const ChunkRequestInfo& requestInfo = *iter;
 						NOT_NULL (requestInfo.m_chunk);
+
+						const BoxExtent& rebuiltExtent = requestInfo.m_chunk->getBoxExtent ();
+						rebuiltArea.expand (Vector2d (rebuiltExtent.getMin ().x, rebuiltExtent.getMin ().z));
+						rebuiltArea.expand (Vector2d (rebuiltExtent.getMax ().x, rebuiltExtent.getMax ().z));
 
 						//-- Find the node in the tree
 						TerrainQuadTree::Node* const node = getChunkTree ()->findChunkNode (requestInfo.m_x, requestInfo.m_z, requestInfo.m_size);
@@ -1002,6 +1011,16 @@ void ClientProceduralTerrainAppearance::retrieveCompletedChunkCreationRequests (
 					boxExtent.setMin (Vector::negativeMaxXYZ);
 					boxExtent.setMax (Vector::maxXYZ);
 					std::for_each (m_floraManagerList->begin (), m_floraManagerList->end (), VoidBindSecond (VoidMemberFunction (&ClientRadialFloraManager::markExtentDirty), &boxExtent));
+
+					//-- The rebuild usually means the terrain rules changed there (run-time edits), so the
+					//-- flora already planted in the rebuilt area is decided again from the new chunks.
+					//-- Resnapping alone keeps removed flora (and never adds new flora) until the camera
+					//-- moves far enough away.
+					if (rebuiltArea.x0 <= rebuiltArea.x1)
+					{
+						for (FloraManagerList::iterator fi = m_floraManagerList->begin (); fi != m_floraManagerList->end (); ++fi)
+							(*fi)->markRegionReplant (rebuiltArea);
+					}
 				}
 			}
 			break;

@@ -13,6 +13,7 @@
 
 #include <qapplication.h>
 #include <qcheckbox.h>
+#include <qcombobox.h>
 #include <qfiledialog.h>
 #include <qmessagebox.h>
 #include <qlabel.h>
@@ -46,6 +47,9 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	m_feather (0),
 	m_strength (0),
 	m_levelHeight (0),
+	m_paintFamily (0),
+	m_familyIds (),
+	m_familyPlanet (),
 	m_status (0),
 	m_editList (0),
 	m_undo (0),
@@ -75,11 +79,13 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	IGNORE_RETURN (new QRadioButton ("Lower  (right drag raises)",            m_tools, "lower"));
 	IGNORE_RETURN (new QRadioButton ("Flatten  (first click sets the height, kept for later strokes)", m_tools, "flatten"));
 	IGNORE_RETURN (new QRadioButton ("Level to the height box",                                      m_tools, "level"));
+	IGNORE_RETURN (new QRadioButton ("Paint ground texture (choose it below)",                       m_tools, "paint"));
+	IGNORE_RETURN (new QRadioButton ("Clear flora (trees, rocks, bushes, grass)",                     m_tools, "clearFlora"));
 	QLabel * const toolHint = new QLabel ("Flatten/Level: right-click the ground to pick a new height. Click Flatten again to let the next stroke pick one.", m_tools, "toolHint");
 	toolHint->setAlignment (Qt::WordBreak | Qt::AlignLeft);
 	layout->addWidget (m_tools);
 
-	QGridLayout * const grid = new QGridLayout (4, 2, 4, "terrainEditGrid");
+	QGridLayout * const grid = new QGridLayout (5, 2, 4, "terrainEditGrid");
 	layout->addLayout (grid);
 
 	grid->addWidget (new QLabel ("Brush size (m)", this), 0, 0);
@@ -99,6 +105,10 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	m_levelHeight = new QLineEdit (this, "levelHeight");
 	m_levelHeight->setValidator (new QDoubleValidator (-10000.0, 10000.0, 2, m_levelHeight));
 	grid->addWidget (m_levelHeight, 3, 1);
+
+	grid->addWidget (new QLabel ("Paint texture", this), 4, 0);
+	m_paintFamily = new QComboBox (false, this, "paintFamily");
+	grid->addWidget (m_paintFamily, 4, 1);
 
 	m_status = new QLabel ("", this, "status");
 	m_status->setTextFormat (Qt::PlainText);
@@ -158,6 +168,7 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	IGNORE_RETURN (connect (m_feather,     SIGNAL (valueChanged (int)),            this, SLOT (onFeatherChanged (int))));
 	IGNORE_RETURN (connect (m_strength,    SIGNAL (textChanged (const QString &)), this, SLOT (onStrengthChanged (const QString &))));
 	IGNORE_RETURN (connect (m_levelHeight, SIGNAL (textChanged (const QString &)), this, SLOT (onLevelHeightChanged (const QString &))));
+	IGNORE_RETURN (connect (m_paintFamily, SIGNAL (activated (int)),               this, SLOT (onPaintFamilyActivated (int))));
 	IGNORE_RETURN (connect (m_undo,        SIGNAL (clicked ()),                    this, SLOT (onUndo ())));
 	IGNORE_RETURN (connect (m_redo,        SIGNAL (clicked ()),                    this, SLOT (onRedo ())));
 	IGNORE_RETURN (connect (m_removeAll,   SIGNAL (clicked ()),                    this, SLOT (onRemoveAll ())));
@@ -192,7 +203,7 @@ void TerrainEditWindow::onBrushModeToggled (const bool on)
 
 void TerrainEditWindow::onToolClicked (const int id)
 {
-	if (!m_updating && id >= 0 && id <= static_cast<int> (TerrainEditData::T_level))
+	if (!m_updating && id >= 0 && id <= static_cast<int> (TerrainEditData::T_clearFlora))
 		TerrainEditData::getInstance ().setTool (static_cast<TerrainEditData::Tool> (id));
 }
 
@@ -230,6 +241,26 @@ void TerrainEditWindow::onLevelHeightChanged (const QString & text)
 	const float value = text.toFloat (&ok);
 	if (!m_updating && ok)
 		TerrainEditData::getInstance ().setLevelHeight (value);
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditWindow::onPaintFamilyActivated (const int index)
+{
+	if (m_updating || index < 0 || index >= static_cast<int> (m_familyIds.size ()))
+		return;
+
+	TerrainEditData & data = TerrainEditData::getInstance ();
+	data.setPaintFamily (m_familyIds [static_cast<size_t> (index)]);
+
+	//-- choosing a texture means you want to paint with it
+	if (data.getTool () != TerrainEditData::T_paint)
+	{
+		data.setTool (TerrainEditData::T_paint);
+		m_updating = true;
+		m_tools->setButton (static_cast<int> (TerrainEditData::T_paint));
+		m_updating = false;
+	}
 }
 
 // ----------------------------------------------------------------------
@@ -326,6 +357,16 @@ void TerrainEditWindow::onRevert ()
 void TerrainEditWindow::onTimer ()
 {
 	TerrainEditData & data = TerrainEditData::getInstance ();
+
+	//-- the timer runs every 100 ms; a much later tick means the main thread was blocked
+	{
+		static unsigned long s_lastTick = 0;
+		const unsigned long tickNow = ::GetTickCount ();
+		if (s_lastTick != 0 && tickNow - s_lastTick > 400 && data.isBrushMode ())
+			data.logStall (tickNow - s_lastTick);
+		s_lastTick = tickNow;
+	}
+
 	data.tick ();
 
 	if (data.getRevision () != m_shownRevision)
@@ -401,6 +442,40 @@ void TerrainEditWindow::refreshFromData ()
 		m_undo->setEnabled (n > 0);
 		m_redo->setEnabled (data.getNumberOfRedos () > 0);
 		m_removeAll->setEnabled (n > 0);
+
+		//-- ground textures of the current planet (refilled when the planet changes)
+		{
+			char planet [512];
+			const QString planetName = data.getTerrainFileName (planet, sizeof (planet)) ? QString (planet) : QString ();
+			if (planetName != m_familyPlanet)
+			{
+				m_familyPlanet = planetName;
+				m_paintFamily->clear ();
+				m_familyIds.clear ();
+
+				const int count = data.getNumberOfShaderFamilies ();
+				int selected = -1;
+				for (int i = 0; i < count; ++i)
+				{
+					const int familyId = data.getShaderFamilyId (i);
+					const char * const familyName = data.getShaderFamilyName (familyId);
+					m_paintFamily->insertItem (QString ("%1  (#%2)").arg (familyName && *familyName ? familyName : "unnamed").arg (familyId));
+					m_familyIds.push_back (familyId);
+					if (familyId == data.getPaintFamily ())
+						selected = i;
+				}
+
+				//-- default to the first texture so Paint works straight away
+				if (selected < 0 && !m_familyIds.empty ())
+				{
+					selected = 0;
+					data.setPaintFamily (m_familyIds [0]);
+				}
+				if (selected >= 0)
+					m_paintFamily->setCurrentItem (selected);
+				m_paintFamily->setEnabled (!m_familyIds.empty ());
+			}
+		}
 
 		//-- file status
 		char fileName [512];
