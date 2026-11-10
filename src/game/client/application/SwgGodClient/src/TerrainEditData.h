@@ -62,7 +62,8 @@ public:
 		T_ramp,         // drag from one end to the other: a straight slope between the ground heights there
 		T_copy,         // drag a rectangle: copies the shape of the ground there to the stamp clipboard (no edit)
 		T_stamp,        // click: stamps the clipboard (copied ground or a heightmap image) centred there
-		T_scatter       // paint server objects (the template selected in the Tree Browser) along the drag or in a shape
+		T_scatter,      // paint server objects (the template selected in the Tree Browser) along the drag or in a shape
+		T_waterfall     // drag from the top to the bottom: a sheet of fast water just above the ground
 	};
 
 	enum StrokeKind
@@ -81,7 +82,8 @@ public:
 		SK_ramp,        // baked like SK_smooth: m_samples.points = (x, ramp height, z) per pole; m_param2 = half patch
 		SK_copy,        // copy to the clipboard: never becomes an edit
 		SK_stamp,       // baked like SK_smooth: the clipboard stamped at m_points [0]
-		SK_scatter      // server objects (m_scatter [strokeId]); the layer is an empty marker, never saved
+		SK_scatter,     // server objects (m_scatter [strokeId]); the layer is an empty marker, never saved
+		SK_waterfall    // a water ribbon along m_points with m_samples.waterHeights; m_radius = half width
 	};
 
 	//-- how a drag is turned into an area. Brush = along the drag; the others fill a shape
@@ -100,6 +102,7 @@ public:
 	{
 		std::vector<Vector> points;   // x, ground height, z
 		std::vector<int>    counts;   // samples per path segment
+		std::vector<float>  waterHeights;   // river / waterfall: water surface per path point (empty = river default)
 	};
 
 	enum PlantKind
@@ -231,6 +234,12 @@ public:
 	float       getScatterSpacing () const;
 	void        setScatterRandomTurn (bool on);
 	bool        getScatterRandomTurn () const;
+
+	//-- Waterfall: the water look ("" = the planet's own water) and whether to flip the flow direction
+	void        setWaterfallShader (const std::string & shaderTemplate);
+	const std::string & getWaterfallShader () const;
+	void        setWaterfallFlip (bool flip);
+	bool        getWaterfallFlip () const;
 	static std::string getScatterTemplate ();   // "" = none selected
 
 	//-- Stamp clipboard: the shape of copied ground (heights relative to the copied area's edge), or a
@@ -331,6 +340,9 @@ private:
 	bool                             bakeRamp ();
 	void                             copyGround ();
 	bool                             bakeScatter ();
+	bool                             bakeWaterfall ();
+	bool                             existingWaterHeight (const Vector2d & position_w, float ground, float & waterHeight) const;   // water already there, at or above the ground
+	static TerrainGenerator::Layer * createWaterfallLayer (const char * name, const PointList & points, float radius, const PathSamples & samples, const char * waterShader, bool flipFlow);
 	void                             createScatterObjects (int strokeId);
 	void                             removeScatterObjects (int strokeId);
 	void                             updateScatter ();
@@ -440,6 +452,9 @@ private:
 	ScatterList                               m_strokeScatter;
 	std::set<int>                             m_scatterWarned;    // strokes already reported as "nothing came back"
 	float       m_scatterSpacing;
+	std::string m_waterfallShader;
+	bool        m_waterfallFlip;
+	std::string m_strokeWaterfallShader;
 	bool        m_scatterRandomTurn;
 	unsigned long m_lastScatterScan;
 	float       m_stampRotation;

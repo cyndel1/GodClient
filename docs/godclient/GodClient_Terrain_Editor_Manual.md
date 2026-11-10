@@ -40,9 +40,10 @@ Pick a tool, pick a shape, set the boxes the tool uses, then drag in the game wi
 
 | Control | Used by | Meaning |
 | --- | --- | --- |
-| Tool (17 buttons) | — | Raise, Lower, Flatten, Level, Paint texture, Clear flora, Roughen, Terrace, Plant flora, Road, River, Water level, Smooth, Ramp, Copy ground, Stamp, Object scatter |
+| Tool (18 buttons) | — | Raise, Lower, Flatten, Level, Paint texture, Clear flora, Roughen, Terrace, Plant flora, Road, River, Water level, Smooth, Ramp, Copy ground, Stamp, Object scatter, Waterfall |
 | Flatten under selected objects | — (a button) | Levels the ground under the selected objects (see Flatten under selected objects) |
-| Shape | All but Road, River, Ramp, Copy ground, Stamp | Brush, Rectangle, Circle or Polygon (see Shapes) |
+| Shape | All but Road, River, Ramp, Copy ground, Stamp, Waterfall | Brush, Rectangle, Circle or Polygon (see Shapes) |
+| Waterfall box | Waterfall | Look (the water shader) and Flip flow (see Waterfalls) |
 | Stamp box | Copy ground, Stamp | The clipboard, Load heightmap image…, Turn, Mirror, Height (%), Image size, Image height (see Copy ground and Stamp) |
 | Brush size (m) | All | Brush radius; Road, River and Ramp are twice this wide. For Flatten under selected objects, the width of the slope around each object |
 | Soft edge (%) | All | How far the effect fades out at the edge (0 = hard edge) |
@@ -67,7 +68,8 @@ Below the boxes are, in order:
 - the edit list, newest last
 - **Undo**, **Redo** and **Remove all**
 - **Check last stroke**, with a message line under it
-- **Save**, **Save copy to folder…** and **Revert to saved**
+- **Save (this client)** and **Revert to saved**
+- the **Save destinations** box: **Save to my folder** and **Send to server**
 
 ## Shapes
 
@@ -283,6 +285,30 @@ The water only exists inside the outline, so it's always kept **0.3 m below the 
 
 While Water level is selected, the status line shows how far the water height is above the ground under the cursor.
 
+**Joining water.** New water meets water that's already there at the same level:
+
+- **A lake touching a river or another lake:** points on its outline or inside it that are already in water don't count as shore. The lake takes that water's level, and digs its basin down from there. The message line says "the lake joins the water already there".
+- **A river running into a lake or another river:** path points that lie in existing water take that water's height, so the river meets it level. The message line says how many points joined.
+- Only water at or above the ground counts, so a deep planet-wide water table under the land is ignored.
+
+**Waterfalls**
+
+1. Choose **Waterfall (drag top to bottom)**.
+2. Drag from the top of the fall, a few metres back from the edge, to at least 4–5 m past the foot of the cliff. A cyan outline shows the width (Brush size × 2; about 4 gives an 8 m fall).
+3. When you let go, a sheet of falling water is built. It carries on about 3 m past the cliff edge, then drops nearly straight down in front of the face, so it doesn't lie on or cut into the rock. On gentler slopes it steps down just above the ground. It never flows uphill.
+4. If the top starts in a river, or the bottom ends in a lake or pool, that end joins the existing water's level.
+
+The **Waterfall** box sets:
+
+| Setting | What it does |
+| --- | --- |
+| Look | **Dathomir misty falls** (default), **Waterfall tile**, or **The planet's own water** |
+| Flip flow | Tick it before drawing if the water seems to run upward with the chosen look |
+
+- The look and the flip are saved with each waterfall, so Undo, Redo and Save keep them. You can swim in it.
+- Good test: Raise a 40 × 40 m rectangle 15 m with Soft edge 10% for a cliff, put a Water level pool at its foot, then draw the waterfall from the top into the pool.
+- The game's Theed waterfall shaders aren't offered: they need frame files (`wter_thed_falls_static01`–`08`) that this client data doesn't have.
+
 ## History and saving
 
 Every stroke is one entry in the edit list.
@@ -295,9 +321,25 @@ Changing planet or reverting empties the list.
 
 | Button | What it does |
 | --- | --- |
-| Save | Writes the planet's `.trn` into the client's loose data folder (Tatooine: `swg\data\sku.0\sys.client\compiled\game\terrain\tatooine.trn`). The first save of a session backs up the previous file to `_terrain_backup\<name>_<date_time>.trn` beside it |
-| Save copy to folder… | Writes `<folder>\terrain\<name>.trn` and leaves the client's file alone |
+| Save (this client) | Writes the planet's `.trn` into this client's loose data folder (Tatooine: `swg\data\sku.0\sys.client\compiled\game\terrain\tatooine.trn`), so the edits show here after a restart. The first save of a session backs up the previous file to `_terrain_backup\<name>_<date_time>.trn` beside it |
 | Revert to saved | Reloads the planet from disk; unsaved edits are lost |
+
+**Save destinations** (a box below the Save buttons) sends the saved planet to two more places:
+
+| Control | What it does |
+| --- | --- |
+| My storage folder, **…**, **Save to my folder** | Writes `<folder>\terrain\<name>.trn` into the developer's own folder. The default is the central `J:\SWG_Assets_storage`; type or browse to use your own |
+| Server data folder, **…**, **Send to server** | After asking you to confirm, writes `<folder>\terrain\<name>.trn` into the server's data. Pick the server folder that holds `terrain\`, for example `…\sys.shared\compiled\game`. If the folder can't be reached (an offline share or unmapped drive), it stops and says so |
+
+- Both folders are remembered between sessions.
+- Neither overwrites without a copy: a file already there is kept as `terrain\_terrain_backup\<name>_<date_time>.trn` in that folder.
+- Neither changes this client's own file; use **Save (this client)** for that.
+- **Load heightmap image…** opens `<storage folder>\heightmaps` by default. The central storage has the two sample heightmaps there.
+
+The central storage folder is laid out as:
+
+- `J:\SWG_Assets_storage\terrain\` for saved planets, with `_terrain_backup\` for older versions.
+- `J:\SWG_Assets_storage\heightmaps\` for heightmap images.
 
 A save writes three things:
 
@@ -307,7 +349,7 @@ A save writes three things:
 
 Saving again never duplicates edits, and buildings' own ground flattening is never written.
 
-**Getting edits to the server:** the server only sees edits after you copy the saved `.trn` into its data and restart it. Planted trees and cleared trees are in the same file, so they become solid on the server too.
+**Getting edits to the server:** use **Send to server** (or copy the saved `.trn` into the server's data yourself), then restart the server. It only sees edits after the restart. Planted trees and cleared trees are in the same file, so they become solid on the server too.
 
 ## Diagnostics
 
@@ -329,6 +371,8 @@ The log file `terrain_edit_log.txt` sits next to the exe and records every sessi
 | `RAMP`, `FLATTEN UNDER` | What a ramp or Flatten under selected objects built (heights, sizes, footprint) |
 | `COPY ground`, `CLIPBOARD image`, `STAMP` | What was copied or loaded, and where and how a stamp was built |
 | `SCATTER` | Object scatter: spots chosen, create commands sent, objects matched back, objects destroyed |
+| `WATER joins existing water`, `RIVER joins existing water`, `WATERFALL` | A lake or river taking an existing water level; a waterfall's length and top/bottom water heights |
+| `SAVE TO FOLDER` | Save to my folder / Send to server, with any backup kept |
 | `SMOOTH baked`, `WATER requested`, `TREES planting`, `TREES moved` | What Smooth, Water level and tree planting did |
 | `STROKE LIMITS`, `LIMITS`, `spot …`, `CLEAR limited` | The limits a stroke used, and what passed, spot by spot |
 | `FLORA SCATTER` | A Flora scatter change, with the planet's cell sizes and borders |

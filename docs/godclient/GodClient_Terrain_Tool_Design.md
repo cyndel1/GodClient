@@ -372,3 +372,28 @@ Tint, environment and erosion are on hold.
 - **Verified:** 62- and 35-object strokes of Rori trees, all matched back in about 1 s; Undo destroyed 35, and Redo re-created and matched all 35.
 - **Panel:** Object scatter box (object name, Object spacing, Random turn). The panel fits at 450 px; the first left column is 200 px.
 - Manual, guide and PDFs updated.
+
+### 8.10 Save destinations: done (2026-11-10, verified in game)
+
+- Central storage `J:\SWG_Assets_storage` (`terrain\`, `heightmaps\` with the sample images).
+- The panel's "Save copy to folder…" became a **Save destinations** box:
+  - **My storage folder** (default `J:\SWG_Assets_storage`) with **Save to my folder**.
+  - **Server data folder** with **Send to server**, which confirms first and checks the folder can be reached.
+  - Both folders are remembered with `QSettings` (`SWG/GodClient/TerrainEditor`).
+- `saveCopyTo` now keeps any file it replaces as `terrain\_terrain_backup\<name>_<date_time>.trn`, and logs `SAVE TO FOLDER`.
+- Load heightmap image opens `<storage>\heightmaps` by default.
+
+### 8.11 Joined water levels and Waterfall: done (2026-11-10, verified in game)
+
+- **Problem:** a lake next to a river sat lower than the river. The shore clamp (0.3 m below the lowest outline ground) treated the river bed as shore.
+- **`existingWaterHeight`:** uses the template's `getWaterHeight` (water tables and ribbon quads), counting only water at or above the ground.
+  - **Lakes:** outline and inside points that are in water are left out of the shore. The lake takes the lowest such water level (if it's below the dry shore), then digs its basin from there.
+  - **Rivers:** path points in existing water use that height for the ribbon. They're stored in `PathSamples::waterHeights`, so saves rebuild them the same way.
+- **Waterfall** (`T_waterfall` / `SK_waterfall`):
+  - Drag top to bottom; the ground is sampled every 0.5 m.
+  - The water height is the highest ground within 3 m behind each point, plus 0.3 m. So the water overshoots the edge about 3 m and drops in front of the face, never climbing. The ends join existing water.
+  - It's built as an `AffectorRibbon`, registered as run-time water so you can swim in it.
+- **Waterfall looks:**
+  - The engine draws ribbon water with the shader's own animation; the ribbon velocity isn't used. The desert water shader looked like it flowed upward.
+  - Choices: `wter_dath_mistyfalls` (default), `wter_watefall_tile`, or the planet's water. The look is stored in the edit's `m_waterShader`, and a Flip flow option (the edit's `m_param`) reverses the point order.
+  - The Theed falls switcher shaders were dropped: their `wter_thed_falls_static01`–`08` frames aren't in the client data, and there are no `.tre` archives.

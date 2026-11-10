@@ -228,11 +228,12 @@ Open it with **Window → Terrain Editor** (also **Tools** and **Game → Terrai
 - right drag uses its alternate (Raise ↔ Lower), or picks a height for Flatten, Level and Water level
 - Alt + mouse still moves the camera
 
-**Tools:** Raise, Lower, Flatten, Level, Paint texture, Clear flora, Roughen, Terrace, Plant flora, Road, River, Water level, Smooth, Ramp, Copy ground, Stamp and Object scatter.
+**Tools:** Raise, Lower, Flatten, Level, Paint texture, Clear flora, Roughen, Terrace, Plant flora, Road, River, Water level, Smooth, Ramp, Copy ground, Stamp, Object scatter and Waterfall.
 
 - **Copy ground** and **Stamp:** copy the shape of a piece of ground and stamp it elsewhere, turned, mirrored or scaled, or stamp a greyscale heightmap image as a mountain or crater.
 - Outlines on the ground show the brush, the shape being dragged, and where a stamp will go.
 - **Object scatter:** paints real server objects (the template selected in the Tree Browser) at any density, with Undo and Redo. They live on the server, not in the `.trn`.
+- **Water:** lakes and rivers join water that's already there at the same level, and **Waterfall** builds a falling sheet of water from a cliff top into a pool.
 
 - **Ramp:** drag from one end to the other for a straight slope between the two ground heights.
 - **Flatten under selected objects:** a button that levels the ground under the selected buildings to their base height.
@@ -243,7 +244,7 @@ Open it with **Window → Terrain Editor** (also **Tools** and **Game → Terrai
 - **Flora scatter, whole planet (%)** stops bushes, rocks and grass from standing in rows.
 - Water level keeps lakes just below the shoreline, in a dug basin.
 
-Edits have Undo and Redo. **Save** writes the planet's `.trn` (backed up first), and **Revert to saved** reloads it. The server only sees terrain edits after you copy the saved `.trn` into its data and restart it.
+Edits have Undo and Redo. **Save (this client)** writes the planet's `.trn` into this client's data (backed up first), and **Revert to saved** reloads it. The **Save destinations** box also saves it to your own storage folder (default `J:\SWG_Assets_storage`) or sends it to the server's data folder; both keep a backup of any file they replace. The server only uses terrain edits after a restart.
 
 The full Terrain Editor manual is a separate file: `J:\SWG_Claude\GodClient_Terrain_Editor_Manual.pdf` (or `.md`).
 

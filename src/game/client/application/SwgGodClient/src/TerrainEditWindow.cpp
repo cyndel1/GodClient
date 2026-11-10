@@ -16,6 +16,9 @@
 #include <qcombobox.h>
 #include <qgroupbox.h>
 #include <qimage.h>
+#include <qdir.h>
+#include <qfileinfo.h>
+#include <qsettings.h>
 #include <qfiledialog.h>
 #include <qmessagebox.h>
 #include <qlabel.h>
@@ -81,6 +84,8 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	m_scatterTemplate (0),
 	m_scatterSpacing (0),
 	m_scatterTurn (0),
+	m_waterfallLook (0),
+	m_waterfallFlip (0),
 	m_slopeOn (0),
 	m_slopeMin (0),
 	m_slopeMax (0),
@@ -99,6 +104,11 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	m_diagnostic (0),
 	m_save (0),
 	m_saveCopy (0),
+	m_sendServer (0),
+	m_storageFolder (0),
+	m_serverFolder (0),
+	m_storageBrowse (0),
+	m_serverBrowse (0),
 	m_revert (0),
 	m_fileStatus (0),
 	m_timer (0),
@@ -148,6 +158,7 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	IGNORE_RETURN (new QRadioButton ("Copy ground (rectangle)", m_tools, "copy"));
 	IGNORE_RETURN (new QRadioButton ("Stamp (click to place)", m_tools, "stamp"));
 	IGNORE_RETURN (new QRadioButton ("Object scatter", m_tools, "scatter"));
+	IGNORE_RETURN (new QRadioButton ("Waterfall (drag top to bottom)", m_tools, "waterfall"));
 	layout->addWidget (m_tools);
 
 	m_flattenSelection = new QPushButton ("Flatten under selected objects", content, "flattenSelection");
@@ -233,6 +244,27 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	grid->addWidget (new QLabel ("Flora scatter, whole planet (%)", content), 13, 0);
 	m_floraScatter = new QSpinBox (0, 100, 10, content, "floraScatter");
 	grid->addWidget (m_floraScatter, 13, 1);
+
+	//-- Waterfall look
+	{
+		QGroupBox * const waterfall = new QGroupBox ("Waterfall", content, "waterfallBox");
+		waterfall->setColumnLayout (0, Qt::Vertical);
+		waterfall->layout ()->setSpacing (4);
+		waterfall->layout ()->setMargin (6);
+		QGridLayout * const waterfallGrid = new QGridLayout (waterfall->layout ());
+
+		waterfallGrid->addWidget (new QLabel ("Look", waterfall), 0, 0);
+		m_waterfallLook = new QComboBox (false, waterfall, "waterfallLook");
+		m_waterfallLook->insertItem ("Dathomir misty falls");
+		m_waterfallLook->insertItem ("Waterfall tile");
+		m_waterfallLook->insertItem ("The planet's own water");
+		waterfallGrid->addWidget (m_waterfallLook, 0, 1);
+
+		m_waterfallFlip = new QCheckBox ("Flip flow (if the water seems to run upward)", waterfall, "waterfallFlip");
+		waterfallGrid->addMultiCellWidget (m_waterfallFlip, 1, 1, 0, 1);
+
+		layout->addWidget (waterfall);
+	}
 
 	//-- Object scatter
 	{
@@ -376,16 +408,54 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 
 	QHBoxLayout * const fileButtons = new QHBoxLayout (4, "terrainEditFileButtons");
 	layout->addLayout (fileButtons);
-	m_save     = new QPushButton ("Save", content, "save");
-	m_saveCopy = new QPushButton ("Save copy to folder...", content, "saveCopy");
+	m_save     = new QPushButton ("Save (this client)", content, "save");
 	m_revert   = new QPushButton ("Revert to saved", content, "revert");
 	fileButtons->addWidget (m_save);
-	fileButtons->addWidget (m_saveCopy);
 	fileButtons->addWidget (m_revert);
 
-	QLabel * const note = new QLabel ("Save writes the planet's .trn into the client's loose data folder (backed up first). The server only sees edits after you copy the saved .trn into its data and restart it.", content, "note");
+	QLabel * const note = new QLabel ("Save writes the planet's .trn into this client's loose data folder (backed up first), so the edits show here after a restart.", content, "note");
 	note->setAlignment (Qt::WordBreak | Qt::AlignLeft);
 	layout->addWidget (note);
+
+	//-- where else the saved planet goes: the developer's own storage folder, or the server
+	{
+		QGroupBox * const destinations = new QGroupBox ("Save destinations", content, "destinations");
+		destinations->setColumnLayout (0, Qt::Vertical);
+		destinations->layout ()->setSpacing (4);
+		destinations->layout ()->setMargin (6);
+		QGridLayout * const destinationGrid = new QGridLayout (destinations->layout ());
+		destinationGrid->setColStretch (0, 1);
+
+		destinationGrid->addMultiCellWidget (new QLabel ("My storage folder", destinations), 0, 0, 0, 1);
+		m_storageFolder = new QLineEdit (destinations, "storageFolder");
+		destinationGrid->addWidget (m_storageFolder, 1, 0);
+		m_storageBrowse = new QPushButton ("...", destinations, "storageBrowse");
+		m_storageBrowse->setFixedWidth (30);
+		destinationGrid->addWidget (m_storageBrowse, 1, 1);
+		m_saveCopy = new QPushButton ("Save to my folder", destinations, "saveCopy");
+		destinationGrid->addMultiCellWidget (m_saveCopy, 2, 2, 0, 1);
+
+		destinationGrid->addMultiCellWidget (new QLabel ("Server data folder", destinations), 3, 3, 0, 1);
+		m_serverFolder = new QLineEdit (destinations, "serverFolder");
+		destinationGrid->addWidget (m_serverFolder, 4, 0);
+		m_serverBrowse = new QPushButton ("...", destinations, "serverBrowse");
+		m_serverBrowse->setFixedWidth (30);
+		destinationGrid->addWidget (m_serverBrowse, 4, 1);
+		m_sendServer = new QPushButton ("Send to server", destinations, "sendServer");
+		destinationGrid->addMultiCellWidget (m_sendServer, 5, 5, 0, 1);
+
+		QLabel * const destinationNote = new QLabel ("Both write terrain\\<planet>.trn inside the folder, and keep any file they replace in terrain\\_terrain_backup. My storage folder is your own (default J:\\SWG_Assets_storage). Server data folder: the server's folder that holds terrain\\ (for example ...\\sys.shared\\compiled\\game); the server only uses the new file after a restart. Both folders are remembered.", destinations, "destinationNote");
+		destinationNote->setAlignment (Qt::WordBreak | Qt::AlignLeft);
+		destinationGrid->addMultiCellWidget (destinationNote, 6, 6, 0, 1);
+
+		layout->addWidget (destinations);
+
+		//-- remembered between sessions
+		QSettings settings;
+		settings.setPath ("SWG", "GodClient");
+		m_storageFolder->setText (settings.readEntry ("/TerrainEditor/storageFolder", "J:\\SWG_Assets_storage"));
+		m_serverFolder->setText (settings.readEntry ("/TerrainEditor/serverFolder", ""));
+	}
 
 	//-- drop-down lists hold long names (textures with "#id, priority n"); without this their width
 	//-- would push the panel wider than the dock, under the scroll bar. They shrink instead, and the
@@ -419,6 +489,11 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	m_clipboardLabel->setText (QString (data.describeClipboard ().c_str ()));
 	m_scatterSpacing->setValue (static_cast<int> (data.getScatterSpacing () + 0.5f));
 	m_scatterTurn->setChecked (data.getScatterRandomTurn ());
+	m_waterfallFlip->setChecked (data.getWaterfallFlip ());
+	{
+		const std::string & look = data.getWaterfallShader ();
+		m_waterfallLook->setCurrentItem (look.find ("watefall_tile") != std::string::npos ? 1 : look.empty () ? 2 : 0);
+	}
 	{
 		const TerrainEditData::Limits & limits = data.getLimits ();
 		m_slopeOn->setChecked (limits.m_slopeOn);
@@ -436,6 +511,8 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	//-- connections
 	IGNORE_RETURN (connect (m_scatterSpacing, SIGNAL (valueChanged (int)),         this, SLOT (onScatterChangedInt (int))));
 	IGNORE_RETURN (connect (m_scatterTurn, SIGNAL (toggled (bool)),                this, SLOT (onScatterChangedBool (bool))));
+	IGNORE_RETURN (connect (m_waterfallLook, SIGNAL (activated (int)),            this, SLOT (onWaterfallChangedInt (int))));
+	IGNORE_RETURN (connect (m_waterfallFlip, SIGNAL (toggled (bool)),             this, SLOT (onWaterfallChangedBool (bool))));
 	IGNORE_RETURN (connect (m_brushMode,   SIGNAL (toggled (bool)),                this, SLOT (onBrushModeToggled (bool))));
 	IGNORE_RETURN (connect (m_tools,       SIGNAL (clicked (int)),                 this, SLOT (onToolClicked (int))));
 	IGNORE_RETURN (connect (m_radius,      SIGNAL (valueChanged (int)),            this, SLOT (onRadiusChanged (int))));
@@ -473,6 +550,9 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	IGNORE_RETURN (connect (m_check,       SIGNAL (clicked ()),                    this, SLOT (onCheckLastStroke ())));
 	IGNORE_RETURN (connect (m_save,        SIGNAL (clicked ()),                    this, SLOT (onSave ())));
 	IGNORE_RETURN (connect (m_saveCopy,    SIGNAL (clicked ()),                    this, SLOT (onSaveCopy ())));
+	IGNORE_RETURN (connect (m_sendServer,  SIGNAL (clicked ()),                    this, SLOT (onSendServer ())));
+	IGNORE_RETURN (connect (m_storageBrowse, SIGNAL (clicked ()),                  this, SLOT (onStorageBrowse ())));
+	IGNORE_RETURN (connect (m_serverBrowse, SIGNAL (clicked ()),                   this, SLOT (onServerBrowse ())));
 	IGNORE_RETURN (connect (m_revert,      SIGNAL (clicked ()),                    this, SLOT (onRevert ())));
 
 	m_timer = new QTimer (this, "terrainEditTimer");
@@ -501,7 +581,7 @@ void TerrainEditWindow::onBrushModeToggled (const bool on)
 
 void TerrainEditWindow::onToolClicked (const int id)
 {
-	if (!m_updating && id >= 0 && id <= static_cast<int> (TerrainEditData::T_scatter))
+	if (!m_updating && id >= 0 && id <= static_cast<int> (TerrainEditData::T_waterfall))
 		TerrainEditData::getInstance ().setTool (static_cast<TerrainEditData::Tool> (id));
 }
 
@@ -789,6 +869,8 @@ namespace TerrainEditWindowNamespace
 void TerrainEditWindow::onLoadImage ()
 {
 	static QString s_lastFile;
+	if (s_lastFile.isEmpty () && !m_storageFolder->text ().stripWhiteSpace ().isEmpty ())
+		s_lastFile = m_storageFolder->text ().stripWhiteSpace () + "\\heightmaps";   // the shared storage keeps heightmaps here
 	const QString path = QFileDialog::getOpenFileName (s_lastFile, "Heightmap images (*.png *.bmp *.tga *.jpg *.jpeg);;All files (*.*)", this, "loadHeightmap", "Load heightmap image");
 	if (path.isEmpty ())
 		return;
@@ -873,6 +955,21 @@ void TerrainEditWindow::onScatterChangedBool (bool)
 		TerrainEditData::getInstance ().setScatterRandomTurn (m_scatterTurn->isChecked ());
 }
 
+void TerrainEditWindow::onWaterfallChangedInt (const int index)
+{
+	if (m_updating)
+		return;
+	const char * const looks [] = { "shader/wter_dath_mistyfalls.sht", "shader/wter_watefall_tile.sht", "" };   // the Theed falls shaders need frame files this client data does not have
+	if (index >= 0 && index < static_cast<int> (sizeof (looks) / sizeof (looks [0])))
+		TerrainEditData::getInstance ().setWaterfallShader (looks [index]);
+}
+
+void TerrainEditWindow::onWaterfallChangedBool (bool)
+{
+	if (!m_updating)
+		TerrainEditData::getInstance ().setWaterfallFlip (m_waterfallFlip->isChecked ());
+}
+
 void TerrainEditWindow::onStampChangedInt (int)                { onStampChanged (); }
 void TerrainEditWindow::onStampChangedBool (bool)              { onStampChanged (); }
 void TerrainEditWindow::onStampChangedText (const QString &)   { onStampChanged (); }
@@ -945,22 +1042,86 @@ void TerrainEditWindow::onSave ()
 
 // ----------------------------------------------------------------------
 
+void TerrainEditWindow::saveFolderSettings ()
+{
+	QSettings settings;
+	settings.setPath ("SWG", "GodClient");
+	IGNORE_RETURN (settings.writeEntry ("/TerrainEditor/storageFolder", m_storageFolder->text ().stripWhiteSpace ()));
+	IGNORE_RETURN (settings.writeEntry ("/TerrainEditor/serverFolder", m_serverFolder->text ().stripWhiteSpace ()));
+}
+
 void TerrainEditWindow::onSaveCopy ()
 {
-	static QString s_lastFolder;
-
-	const QString folder = QFileDialog::getExistingDirectory (s_lastFolder, this, "saveCopyFolder",
-		"Folder to save into (the terrain/ subfolder is created inside it)");
+	//-- Save to my folder: the developer's storage folder (created if missing)
+	const QString folder = m_storageFolder->text ().stripWhiteSpace ();
 	if (folder.isEmpty ())
+	{
+		m_diagnostic->setText ("NOT SAVED: type or pick My storage folder first.");
 		return;
-
-	s_lastFolder = folder;
-	m_diagnostic->setText ("Saving copy...");
+	}
+	saveFolderSettings ();
+	m_diagnostic->setText ("Saving to my folder...");
 	QApplication::flush ();
 
 	char message [1536];
 	const bool ok = TerrainEditData::getInstance ().saveCopyTo (folder.latin1 (), message, static_cast<int> (sizeof (message)));
-	m_diagnostic->setText (QString (ok ? "" : "NOT SAVED: ") + message);
+	m_diagnostic->setText (QString (ok ? "My folder: " : "NOT SAVED: ") + message);
+}
+
+void TerrainEditWindow::onSendServer ()
+{
+	const QString folder = m_serverFolder->text ().stripWhiteSpace ();
+	if (folder.isEmpty ())
+	{
+		m_diagnostic->setText ("NOT SENT: type or pick the Server data folder first (the server's folder that holds terrain\\).");
+		return;
+	}
+	if (!QFileInfo (folder).isDir ())
+	{
+		m_diagnostic->setText (QString ("NOT SENT: the server folder %1 can't be reached. Check the path, the network share, or that the drive is mapped.").arg (folder));
+		return;
+	}
+
+	char fileName [512];
+	if (!TerrainEditData::getInstance ().getTerrainFileName (fileName, sizeof (fileName)))
+	{
+		m_diagnostic->setText ("NOT SENT: not on a ground planet.");
+		return;
+	}
+
+	const int answer = QMessageBox::question (this, "Send to server",
+		QString ("Write this planet with all its edits to the server?\n\n%1\\%2\n\nAny file already there is kept in terrain\\_terrain_backup. Players only see the change after the server is restarted.").arg (folder).arg (QString (fileName).replace ('/', '\\')),
+		QMessageBox::Yes, QMessageBox::No | QMessageBox::Default | QMessageBox::Escape);
+	if (answer != QMessageBox::Yes)
+		return;
+
+	saveFolderSettings ();
+	m_diagnostic->setText ("Sending to the server...");
+	QApplication::flush ();
+
+	char message [1536];
+	const bool ok = TerrainEditData::getInstance ().saveCopyTo (folder.latin1 (), message, static_cast<int> (sizeof (message)));
+	m_diagnostic->setText (QString (ok ? "Sent to the server (restart the server to use it): " : "NOT SENT: ") + message);
+}
+
+void TerrainEditWindow::onStorageBrowse ()
+{
+	const QString folder = QFileDialog::getExistingDirectory (m_storageFolder->text (), this, "storageFolder", "My storage folder (terrain\\ is created inside it)");
+	if (!folder.isEmpty ())
+	{
+		m_storageFolder->setText (QDir::convertSeparators (folder));
+		saveFolderSettings ();
+	}
+}
+
+void TerrainEditWindow::onServerBrowse ()
+{
+	const QString folder = QFileDialog::getExistingDirectory (m_serverFolder->text (), this, "serverFolder", "Server data folder (the one that holds terrain\\)");
+	if (!folder.isEmpty ())
+	{
+		m_serverFolder->setText (QDir::convertSeparators (folder));
+		saveFolderSettings ();
+	}
 }
 
 // ----------------------------------------------------------------------
@@ -1246,6 +1407,7 @@ void TerrainEditWindow::refreshFromData ()
 				.arg (path));
 			m_save->setEnabled (true);
 			m_saveCopy->setEnabled (true);
+			m_sendServer->setEnabled (true);
 			m_revert->setEnabled (true);
 		}
 		else
@@ -1253,6 +1415,7 @@ void TerrainEditWindow::refreshFromData ()
 			m_fileStatus->setText ("Planet file: (not on a ground planet)");
 			m_save->setEnabled (false);
 			m_saveCopy->setEnabled (false);
+			m_sendServer->setEnabled (false);
 			m_revert->setEnabled (false);
 		}
 	}

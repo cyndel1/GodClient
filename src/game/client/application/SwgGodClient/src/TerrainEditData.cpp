@@ -92,6 +92,7 @@ namespace TerrainEditDataNamespace
 		case TerrainEditData::T_copy:       return "Copy ground";
 		case TerrainEditData::T_stamp:      return "Stamp";
 		case TerrainEditData::T_scatter:    return "Object scatter";
+		case TerrainEditData::T_waterfall:  return "Waterfall";
 		default:                            return "Edit";
 		}
 	}
@@ -173,6 +174,9 @@ TerrainEditData::TerrainEditData () :
 	m_scatter (),
 	m_strokeScatter (),
 	m_scatterSpacing (8.0f),
+	m_waterfallShader ("shader/wter_dath_mistyfalls.sht"),
+	m_waterfallFlip (false),
+	m_strokeWaterfallShader (),
 	m_scatterRandomTurn (true),
 	m_lastScatterScan (0),
 	m_brushMode (false),
@@ -819,6 +823,11 @@ TerrainGenerator::Layer * TerrainEditData::buildStrokeLayer () const
 		IGNORE_RETURN (_snprintf (name, sizeof (name), "godclient_edit_%04d Smooth %.0f%% (r %.0f)", m_nameCounter, m_strokeParam * 100.0f, m_radius));
 		break;
 
+	case SK_waterfall:
+		IGNORE_RETURN (_snprintf (name, sizeof (name), "godclient_edit_%04d Waterfall %.1f m -> %.1f m (w %.0f)", m_nameCounter,
+			m_strokeSamples.waterHeights.empty () ? 0.0f : m_strokeSamples.waterHeights.front (), m_strokeSamples.waterHeights.empty () ? 0.0f : m_strokeSamples.waterHeights.back (), m_radius * 2.0f));
+		break;
+
 	case SK_scatter:
 		{
 			std::string shortName (getScatterTemplate ());
@@ -883,7 +892,7 @@ TerrainGenerator::Layer * TerrainEditData::buildStrokeLayer () const
 		name [sizeof (name) - 1] = '\0';
 	}
 
-	return createLayer (name, m_strokePoints, m_strokeKind, m_strokeOperation, m_strokeHeight, m_strokeFamilyId, m_radius, m_feather, m_strokeParam, m_strokeParam2, m_strokeSubKind, m_strokeSamples, m_waterShader.c_str (), m_strokeShape, m_strokeLimits);
+	return createLayer (name, m_strokePoints, m_strokeKind, m_strokeOperation, m_strokeHeight, m_strokeFamilyId, m_radius, m_feather, m_strokeParam, m_strokeParam2, m_strokeSubKind, m_strokeSamples, (m_strokeKind == SK_waterfall ? m_strokeWaterfallShader : m_waterShader).c_str (), m_strokeShape, m_strokeLimits);
 }
 
 // ----------------------------------------------------------------------
@@ -2485,6 +2494,9 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 	if (kind == SK_road || kind == SK_river)
 		return createPathLayer (name, points, kind, familyId, radius, feather, param, samples, waterShader);
 
+	if (kind == SK_waterfall)
+		return createWaterfallLayer (name, points, radius, samples, waterShader, param > 0.5f);
+
 	if (kind == SK_smooth || kind == SK_ramp || kind == SK_stamp)
 		return createSmoothLayer (name, samples, param2);
 
@@ -2848,7 +2860,7 @@ bool TerrainEditData::beginStroke (const Vector2d & position_w, const bool alter
 	m_strokeNameOverride.clear ();
 
 	//-- roads, rivers and ramps are always paths; water always fills a shape (a brush drag draws its outline)
-	if (m_tool == T_road || m_tool == T_river || m_tool == T_ramp || m_tool == T_stamp)
+	if (m_tool == T_road || m_tool == T_river || m_tool == T_ramp || m_tool == T_stamp || m_tool == T_waterfall)
 		m_strokeShape = SH_brush;
 	else if (m_tool == T_water && m_shape == SH_brush)
 		m_strokeShape = SH_polygon;
@@ -2861,6 +2873,13 @@ bool TerrainEditData::beginStroke (const Vector2d & position_w, const bool alter
 
 	switch (m_tool)
 	{
+	case T_waterfall:
+		m_strokeKind      = SK_waterfall;
+		m_strokeOperation = TGO_replace;
+		m_strokeHeight    = 0.0f;
+		m_strokeParam     = m_waterfallFlip ? 1.0f : 0.0f;
+		break;
+
 	case T_scatter:
 		if (getScatterTemplate ().empty ())
 		{
@@ -3070,7 +3089,7 @@ void TerrainEditData::continueStroke (const Vector2d & position_w)
 	}
 
 	//-- ramp: only the two ends matter (start and the current point); built when the drag ends
-	if (m_strokeKind == SK_ramp)
+	if (m_strokeKind == SK_ramp || m_strokeKind == SK_waterfall)
 	{
 		if (m_strokePoints.size () < 2)
 			m_strokePoints.push_back (position_w);
@@ -3164,10 +3183,29 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 		//-- (e.g. the box still at 0 m) means "fill it": just below the shore.
 		if (m_strokeKind == SK_water)
 		{
+			//-- the shore: dry outline points only. Where the outline crosses water that is already
+			//-- there (a river running in), that water is the level to join, and its bed is not shore.
 			float lowestShore = FLT_MAX;
+			float lowestAll   = FLT_MAX;
+			float joinHeight  = FLT_MAX;
+			int   wetPoints   = 0;
 			const int step = std::max (1, numberOfPoints / 64);
 			for (int i = 0; i < numberOfPoints; i += step)
-				lowestShore = std::min (lowestShore, m_appearance->generateHeight_expensive (m_strokePoints [static_cast<size_t> (i)]));
+			{
+				const Vector2d & p = m_strokePoints [static_cast<size_t> (i)];
+				const float ground = m_appearance->generateHeight_expensive (p);
+				lowestAll = std::min (lowestAll, ground);
+				float existing = 0.0f;
+				if (existingWaterHeight (p, ground, existing))
+				{
+					joinHeight = std::min (joinHeight, existing);
+					++wetPoints;
+				}
+				else
+					lowestShore = std::min (lowestShore, ground);
+			}
+			if (lowestShore == FLT_MAX)
+				lowestShore = lowestAll;   // the whole outline is in water
 
 			float lowestInside = FLT_MAX;
 			float gridRadius = 0.0f;
@@ -3175,7 +3213,19 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 			const int innerStep = std::max (1, static_cast<int> (inner.size ()) / 48);
 			for (size_t i = 0; i < inner.size (); i += static_cast<size_t> (innerStep))
 				if (isInsidePolygon (inner [i], m_strokePoints))
-					lowestInside = std::min (lowestInside, m_appearance->generateHeight_expensive (inner [i]));
+				{
+					const float ground = m_appearance->generateHeight_expensive (inner [i]);
+					lowestInside = std::min (lowestInside, ground);
+
+					//-- a lake drawn over (part of) another lake or a river: inside, that water stands
+					//-- above its dug bed, so the new lake joins it there too
+					float existing = 0.0f;
+					if (existingWaterHeight (inner [i], ground, existing))
+					{
+						joinHeight = std::min (joinHeight, existing);
+						++wetPoints;
+					}
+				}
 			lowestInside = std::min (lowestInside, lowestShore);
 
 			const float requested = m_strokeHeight;
@@ -3183,7 +3233,14 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 			const float highest   = lowestShore - shoreGap;
 			const char * reason   = 0;
 
-			if (lowestShore < FLT_MAX)
+			if (joinHeight < FLT_MAX && joinHeight <= highest + shoreGap)
+			{
+				//-- touching existing water: take its level so the lake and the river meet
+				m_strokeHeight = joinHeight;
+				reason = "the outline touches water that is already there (a river), so the lake takes its level";
+				logEvent ("WATER joins existing water at %.2f m (%d outline points in water)", joinHeight, wetPoints);
+			}
+			else if (lowestShore < FLT_MAX)
 			{
 				if (requested <= lowestInside)
 				{
@@ -3203,7 +3260,9 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 
 			char note [260];
 			note [0] = '\0';
-			if (reason)
+			if (reason && joinHeight < FLT_MAX && m_strokeHeight == joinHeight)
+				IGNORE_RETURN (_snprintf (note, sizeof (note), "Water at %.1f m: the lake joins the water already there (a river), so their levels match.", m_strokeHeight));
+			else if (reason)
 				IGNORE_RETURN (_snprintf (note, sizeof (note), "Water at %.1f m, %.1f m below the lowest point of the shore (you asked for %.1f m; %s).", m_strokeHeight, shoreGap, requested, reason));
 			if (hidden)
 				IGNORE_RETURN (_snprintf (note, sizeof (note), "The ground inside is not lower than the shore, so the water is hidden under it. Set River/Lake depth above 0 to dig a basin."));
@@ -3235,6 +3294,40 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 		if (numberOfPoints < 2)
 			return;
 		samplePath (m_strokePoints, m_strokeSamples);
+
+		//-- rivers: where the path runs into water that is already there (a lake, another river),
+		//-- the river's surface takes that water's height so the two meet level
+		if (m_strokeKind == SK_river)
+		{
+			m_strokeSamples.waterHeights.clear ();
+			int joined = 0;
+			size_t first = 0;
+			for (int p = 0; p < numberOfPoints; ++p)
+			{
+				const size_t sampleIndex = std::min (first, m_strokeSamples.points.size () - 1);
+				const float bank = m_strokeSamples.points [sampleIndex].y;
+				float water = bank - m_strokeParam * 0.3f;
+				float existing = 0.0f;
+				if (existingWaterHeight (m_strokePoints [static_cast<size_t> (p)], bank, existing))
+				{
+					water = existing;
+					++joined;
+				}
+				m_strokeSamples.waterHeights.push_back (water);
+				if (static_cast<size_t> (p) < m_strokeSamples.counts.size ())
+					first += static_cast<size_t> (m_strokeSamples.counts [static_cast<size_t> (p)]);
+				else
+					first = m_strokeSamples.points.size () - 1;
+			}
+			if (joined > 0)
+			{
+				logEvent ("RIVER joins existing water at %d of %d path points", joined, numberOfPoints);
+				char note [200];
+				IGNORE_RETURN (_snprintf (note, sizeof (note), "River: joined the water already there at %d of its %d path points, so the levels match.", joined, numberOfPoints));
+				note [sizeof (note) - 1] = '\0';
+				m_message = note;
+			}
+		}
 	}
 
 	//-- smooth: built once, when the drag ends, from the ground as it is before the stroke
@@ -3271,6 +3364,18 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 			return;
 		if (!bakeRamp ())
 			return;
+	}
+
+	//-- waterfall: built once, when the drag ends, following the ground from the top to the bottom
+	if (m_strokeKind == SK_waterfall)
+	{
+		if (!force || m_strokeLayer)
+			return;
+		if (m_waterShader.empty ())
+			m_waterShader = findWaterShader ();
+		if (!bakeWaterfall ())
+			return;
+		numberOfPoints = static_cast<int> (m_strokePoints.size ());
 	}
 
 	//-- Clear flora with limits: built once, when the drag ends (each baked tree is checked)
@@ -3334,7 +3439,7 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 		if (m_message.empty ())
 			m_message = note;
 	}
-	if (m_strokeKind == SK_river || m_strokeKind == SK_water)
+	if (m_strokeKind == SK_river || m_strokeKind == SK_water || m_strokeKind == SK_waterfall)
 	{
 		m_appearance->addRunTimeWater (newLayer, m_nameCounter);
 		refreshSwimWater ();
@@ -3388,7 +3493,7 @@ void TerrainEditData::endStroke ()
 		edit.m_param2    = m_strokeParam2;
 		edit.m_subKind   = m_strokeSubKind;
 		edit.m_samples   = m_strokeSamples;
-		edit.m_waterShader = m_waterShader;
+		edit.m_waterShader = m_strokeKind == SK_waterfall ? m_strokeWaterfallShader : m_waterShader;
 		edit.m_shape       = m_strokeShape;
 		const bool floraFromList = m_strokeShape != SH_brush || (m_strokeKind == SK_flora && m_strokeLimits.any ());
 		edit.m_floraPoints = floraFromList ? m_strokeFloraPoints : m_strokePoints;
@@ -3769,6 +3874,13 @@ TerrainGenerator::Layer * TerrainEditData::createPathLayer (const char * const n
 		heights.add (samples.points.back ().y - depth * 0.3f);
 		while (heights.getNumberOfElements () < static_cast<int> (points.size ()))
 			heights.add (samples.points.back ().y - depth * 0.3f);
+		//-- path points that joined existing water carry their own surface height
+		if (samples.waterHeights.size () == points.size ())
+		{
+			heights.clear ();
+			for (size_t w = 0; w < samples.waterHeights.size (); ++w)
+				heights.add (samples.waterHeights [w]);
+		}
 		ribbon->copyHeightList (heights);
 
 		layer->addAffector (ribbon);
@@ -3798,6 +3910,166 @@ TerrainGenerator::Layer * TerrainEditData::createPathLayer (const char * const n
 		layer->addLayer (tintLayer);
 	}
 
+	layer->calculateExtent ();
+	return layer;
+}
+
+// ----------------------------------------------------------------------
+
+void  TerrainEditData::setWaterfallShader (const std::string & shaderTemplate) { m_waterfallShader = shaderTemplate; }
+const std::string & TerrainEditData::getWaterfallShader () const          { return m_waterfallShader; }
+void  TerrainEditData::setWaterfallFlip (const bool flip)                  { m_waterfallFlip = flip; }
+bool  TerrainEditData::getWaterfallFlip () const                           { return m_waterfallFlip; }
+
+// ----------------------------------------------------------------------
+
+bool TerrainEditData::existingWaterHeight (const Vector2d & position_w, const float ground, float & waterHeight) const
+{
+	//-- water from the planet or from earlier edits (lakes, river ribbons) at this spot, counted only
+	//-- when it is at or above the ground there (so a deep global water table under the land is ignored)
+	const ProceduralTerrainAppearanceTemplate * const terrainTemplate = m_appearance ? dynamic_cast<const ProceduralTerrainAppearanceTemplate *> (m_appearance->getAppearanceTemplate ()) : 0;
+	if (!terrainTemplate)
+		return false;
+	float height = 0.0f;
+	if (!terrainTemplate->getWaterHeight (Vector (position_w.x, 0.0f, position_w.y), height))
+		return false;
+	if (height < ground - 0.2f)
+		return false;
+	waterHeight = height;
+	return true;
+}
+
+// ----------------------------------------------------------------------
+
+bool TerrainEditData::bakeWaterfall ()
+{
+	//-- a sheet of water from the top of the drag to the bottom, just above the ground all the way
+	//-- (so it hugs a cliff or runs down steps). Where either end is in water that is already there
+	//-- (a river above, a pool below), it joins that water's height.
+	m_strokeSamples.points.clear ();
+	m_strokeSamples.counts.clear ();
+	m_strokeSamples.waterHeights.clear ();
+
+	if (m_strokePoints.size () < 2 || m_strokePoints.front ().magnitudeBetween (m_strokePoints.back ()) < 1.0f)
+	{
+		m_message = "Waterfall: drag from the top of the fall to the bottom (at least 1 m).";
+		return false;
+	}
+	//-- the chosen waterfall look (the game's falling-water shaders); the planet's own water if none
+	//-- is chosen or the file is missing
+	m_strokeWaterfallShader = (!m_waterfallShader.empty () && TreeFile::exists (m_waterfallShader.c_str ())) ? m_waterfallShader : m_waterShader;
+	if (m_strokeWaterfallShader.empty ())
+	{
+		m_message = "Waterfall: no water look found on this planet.";
+		return false;
+	}
+
+	const Vector2d top    = m_strokePoints.front ();
+	const Vector2d bottom = m_strokePoints.back ();
+	const float length = top.magnitudeBetween (bottom);
+	//-- the ground every 0.5 m along the drag
+	const float spacing = 0.5f;
+	const int pieces = std::max (2, std::min (160, static_cast<int> (ceilf (length / spacing))));
+	const float step = length / static_cast<float> (pieces);
+
+	PointList points;
+	std::vector<float> ground;
+	for (int i = 0; i <= pieces; ++i)
+	{
+		const float t = static_cast<float> (i) / static_cast<float> (pieces);
+		const Vector2d p (top.x + (bottom.x - top.x) * t, top.y + (bottom.y - top.y) * t);
+		points.push_back (p);
+		ground.push_back (m_appearance->generateHeight_expensive (p));
+	}
+
+	//-- real falls shoot out over the edge: the water keeps the height of the ground up to 3 m
+	//-- behind it (back up the drag), so it carries on 3 m past the top of the cliff face and then
+	//-- drops nearly straight down in front of it, instead of lying on (and cutting into) the rock
+	const int lookback = std::max (1, static_cast<int> (3.0f / step + 0.5f));
+	for (int i = 0; i <= pieces; ++i)
+	{
+		float water = ground [static_cast<size_t> (i)] + 0.3f;
+		for (int j = std::max (0, i - lookback); j < i; ++j)
+			water = std::max (water, ground [static_cast<size_t> (j)] + 0.3f);
+		if (i > 0)
+			water = std::min (water, m_strokeSamples.waterHeights.back ());   // it never climbs
+		m_strokeSamples.waterHeights.push_back (water);
+	}
+
+	//-- the two ends join water that is already there (a river above, a pool below)
+	{
+		float existing = 0.0f;
+		if (existingWaterHeight (points.front (), ground.front (), existing))
+			m_strokeSamples.waterHeights.front () = existing;
+		if (existingWaterHeight (points.back (), ground.back (), existing))
+			m_strokeSamples.waterHeights.back () = existing;
+		for (size_t i = 1; i < m_strokeSamples.waterHeights.size (); ++i)
+			m_strokeSamples.waterHeights [i] = std::min (m_strokeSamples.waterHeights [i], m_strokeSamples.waterHeights [i - 1]);
+	}
+
+	float highest = m_strokeSamples.waterHeights.front ();
+	float lowest  = m_strokeSamples.waterHeights.back ();
+
+	m_strokePoints = points;
+	logEvent ("WATERFALL %.1f %.1f -> %.1f %.1f: %.0f m long, water %.1f m -> %.1f m, %d points, width %.0f m",
+		top.x, top.y, bottom.x, bottom.y, length, m_strokeSamples.waterHeights.front (), m_strokeSamples.waterHeights.back (), static_cast<int> (points.size ()), m_radius * 2.0f);
+
+	char note [200];
+	IGNORE_RETURN (_snprintf (note, sizeof (note), "Waterfall: %.0f m long, falling from %.1f m to %.1f m.", length, m_strokeSamples.waterHeights.front (), m_strokeSamples.waterHeights.back ()));
+	note [sizeof (note) - 1] = '\0';
+	m_message = note;
+	UNREF (highest);
+	UNREF (lowest);
+	return true;
+}
+
+// ----------------------------------------------------------------------
+
+TerrainGenerator::Layer * TerrainEditData::createWaterfallLayer (const char * const name, const PointList & points, const float radius, const PathSamples & samples, const char * const waterShader, const bool flipFlow)
+{
+	TerrainGenerator::Layer * const layer = new TerrainGenerator::Layer ();
+	layer->setName (name ? name : "godclient_edit");
+	if (points.size () < 2 || samples.waterHeights.size () != points.size () || !waterShader || !*waterShader)
+		return layer;
+
+	AffectorRibbon * const ribbon = new AffectorRibbon ();
+	ribbon->setName ("godclient_waterfall");
+	//-- the shader's animation scrolls along the ribbon; which way looks "down" depends on the shader,
+	//-- so the user can flip it. Default: built from the top down (the drag order).
+	if (flipFlow)
+	{
+		for (PointList::const_reverse_iterator i = points.rbegin (); i != points.rend (); ++i)
+			ribbon->addPoint (*i);
+	}
+	else
+	{
+		for (PointList::const_iterator i = points.begin (); i != points.end (); ++i)
+			ribbon->addPoint (*i);
+	}
+	ribbon->setWidth (radius * 2.0f);
+	ribbon->setFeatherFunction (TGFF_linear);
+	ribbon->setFeatherDistance (0.0f);
+	ribbon->setRibbonWaterShaderTemplateName (waterShader);
+	ribbon->setWaterShaderSize (4.0f);
+	ribbon->setVelocity (4.0f);    // fast water
+	ribbon->setCapWidth (0.0f);
+	ribbon->setWaterType (TGWT_water);
+	ribbon->setTerrainShaderFamilyId (0);
+
+	ArrayList<float> heights;
+	if (flipFlow)
+	{
+		for (size_t i = samples.waterHeights.size (); i > 0; --i)
+			heights.add (samples.waterHeights [i - 1]);
+	}
+	else
+	{
+		for (size_t i = 0; i < samples.waterHeights.size (); ++i)
+			heights.add (samples.waterHeights [i]);
+	}
+	ribbon->copyHeightList (heights);
+
+	layer->addAffector (ribbon);
 	layer->calculateExtent ();
 	return layer;
 }
@@ -3890,7 +4162,7 @@ void TerrainEditData::drawOverlay ()
 
 	if (m_strokeActive && !m_strokePoints.empty ())
 	{
-		if (m_strokeKind == SK_ramp)
+		if (m_strokeKind == SK_ramp || m_strokeKind == SK_waterfall)
 		{
 			if (m_strokePoints.size () >= 2 && m_strokePoints.front ().magnitudeBetween (m_strokePoints.back ()) > 0.1f)
 			{
@@ -3903,7 +4175,7 @@ void TerrainEditData::drawOverlay ()
 				corridor.push_back (Vector2d (b.x + side.x, b.y + side.y));
 				corridor.push_back (Vector2d (b.x - side.x, b.y - side.y));
 				corridor.push_back (Vector2d (a.x - side.x, a.y - side.y));
-				drawGroundLine (corridor, true, VectorArgb::solidGreen);
+				drawGroundLine (corridor, true, m_strokeKind == SK_waterfall ? VectorArgb::solidCyan : VectorArgb::solidGreen);
 				PointList middle;
 				middle.push_back (a);
 				middle.push_back (b);
@@ -3955,7 +4227,7 @@ void TerrainEditData::drawOverlay ()
 		return;
 	}
 
-	const bool brushShaped = m_tool == T_road || m_tool == T_river || m_tool == T_ramp || (m_shape == SH_brush && m_tool != T_copy && m_tool != T_water);
+	const bool brushShaped = m_tool == T_road || m_tool == T_river || m_tool == T_ramp || m_tool == T_waterfall || (m_shape == SH_brush && m_tool != T_copy && m_tool != T_water);
 	if (brushShaped)
 	{
 		for (int i = 0; i < circlePoints; ++i)
@@ -4031,6 +4303,7 @@ namespace TerrainEditDataNamespace
 		case TerrainEditData::SK_copy:    return "copy";
 		case TerrainEditData::SK_stamp:   return "stamp";
 		case TerrainEditData::SK_scatter: return "scatter";
+		case TerrainEditData::SK_waterfall: return "waterfall";
 		case TerrainEditData::SK_height:
 		default:                          return "height";
 		}
@@ -4399,6 +4672,14 @@ void TerrainEditData::diagnoseLastEdit (char * const summary, const int summaryS
 	if (edit.m_kind == SK_smooth || edit.m_kind == SK_ramp || edit.m_kind == SK_stamp)
 	{
 		IGNORE_RETURN (_snprintf (summary, static_cast<size_t> (summarySize), "%s stroke: %d ground points baked (patches %.1f m wide).", edit.m_kind == SK_ramp ? "Ramp" : edit.m_kind == SK_stamp ? "Stamp" : "Smooth", static_cast<int> (edit.m_samples.points.size ()), edit.m_param2 * 2.0f));
+		summary [summarySize - 1] = '\0';
+		return;
+	}
+
+	if (edit.m_kind == SK_waterfall)
+	{
+		IGNORE_RETURN (_snprintf (summary, static_cast<size_t> (summarySize), "Waterfall: %d points, water from %.1f m down to %.1f m.", static_cast<int> (edit.m_points.size ()),
+			edit.m_samples.waterHeights.empty () ? 0.0f : edit.m_samples.waterHeights.front (), edit.m_samples.waterHeights.empty () ? 0.0f : edit.m_samples.waterHeights.back ()));
 		summary [summarySize - 1] = '\0';
 		return;
 	}
@@ -4773,10 +5054,34 @@ bool TerrainEditData::saveCopyTo (const char * const folder, char * const messag
 
 	//-- keep the terrain/... part so the folder can be dropped into a client or server data folder
 	const std::string path = std::string (folder) + "/" + fileName;
+
+	//-- the storage folder and the server folder are shared: every save keeps the file it replaces
+	//-- in terrain/_terrain_backup/<name>_<date_time>.trn
+	std::string backup;
+	if (::GetFileAttributesA (path.c_str ()) != INVALID_FILE_ATTRIBUTES)
+	{
+		SYSTEMTIME now;
+		::GetLocalTime (&now);
+		char stamp [32];
+		setMessage (stamp, sizeof (stamp), "%04d%02d%02d_%02d%02d%02d", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+		const std::string backupFolder (directoryOf (path) + "/_terrain_backup");
+		IGNORE_RETURN (Os::createDirectories (backupFolder.c_str ()));
+		backup = backupFolder + "/" + baseNameOf (path) + "_" + stamp + ".trn";
+		if (!::CopyFileA (path.c_str (), backup.c_str (), TRUE))
+		{
+			setMessage (message, messageSize, "Not saved: could not back up %s to %s.", path.c_str (), backup.c_str ());
+			return false;
+		}
+	}
+
 	if (!writeTerrain (path.c_str (), message, messageSize))
 		return false;
 
-	setMessage (message, messageSize, "Saved a copy with %d stroke(s) to %s", getNumberOfEdits (), path.c_str ());
+	logEvent ("SAVE TO FOLDER %s (%d strokes)%s%s", path.c_str (), getNumberOfEdits (), backup.empty () ? "" : ", previous file kept as ", backup.c_str ());
+	if (backup.empty ())
+		setMessage (message, messageSize, "Saved %d stroke(s) to %s", getNumberOfEdits (), path.c_str ());
+	else
+		setMessage (message, messageSize, "Saved %d stroke(s) to %s\nThe previous file was kept as %s", getNumberOfEdits (), path.c_str (), backup.c_str ());
 	return true;
 }
 
@@ -4821,7 +5126,7 @@ bool TerrainEditData::undo ()
 		removeFloraClearing (edit.m_strokeId, static_cast<int> (edit.m_floraPoints.size ()));
 	if (edit.m_kind == SK_scatter)
 		removeScatterObjects (edit.m_strokeId);
-	if (edit.m_kind == SK_river || edit.m_kind == SK_water)
+	if (edit.m_kind == SK_river || edit.m_kind == SK_water || edit.m_kind == SK_waterfall)
 	{
 		m_appearance->removeRunTimeWater (edit.m_strokeId);
 		refreshSwimWater ();
@@ -4853,7 +5158,7 @@ bool TerrainEditData::redo ()
 		addFloraClearing (edit.m_strokeId, edit.m_floraPoints, 0, edit.m_floraRadius);
 	if (edit.m_kind == SK_scatter)
 		createScatterObjects (edit.m_strokeId);
-	if (edit.m_kind == SK_river || edit.m_kind == SK_water)
+	if (edit.m_kind == SK_river || edit.m_kind == SK_water || edit.m_kind == SK_waterfall)
 	{
 		m_appearance->addRunTimeWater (edit.m_layer, edit.m_strokeId);
 		refreshSwimWater ();
@@ -4892,7 +5197,7 @@ void TerrainEditData::removeAll ()
 			removeFloraClearing (i->m_strokeId, static_cast<int> (i->m_floraPoints.size ()));
 		if (i->m_kind == SK_scatter)
 			removeScatterObjects (i->m_strokeId);
-		if (i->m_kind == SK_river || i->m_kind == SK_water)
+		if (i->m_kind == SK_river || i->m_kind == SK_water || i->m_kind == SK_waterfall)
 			m_appearance->removeRunTimeWater (i->m_strokeId);
 	}
 	m_edits.clear ();

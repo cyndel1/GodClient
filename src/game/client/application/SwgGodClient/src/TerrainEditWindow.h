@@ -64,6 +64,8 @@ public slots:
 	void onLoadImage ();
 	void onScatterChangedInt (int value);
 	void onScatterChangedBool (bool on);
+	void onWaterfallChangedInt (int value);
+	void onWaterfallChangedBool (bool on);
 	void onStampChanged ();
 	void onStampChangedInt (int value);
 	void onStampChangedBool (bool on);
@@ -74,6 +76,9 @@ public slots:
 	void onCheckLastStroke ();
 	void onSave ();
 	void onSaveCopy ();
+	void onSendServer ();
+	void onStorageBrowse ();
+	void onServerBrowse ();
 	void onRevert ();
 	void onTimer ();
 
@@ -83,6 +88,7 @@ private:
 	TerrainEditWindow & operator= (const TerrainEditWindow &);
 
 	void refreshFromData ();
+	void saveFolderSettings ();
 
 private:
 
@@ -119,6 +125,8 @@ private:
 	QLabel *       m_scatterTemplate;  // object scatter
 	QSpinBox *     m_scatterSpacing;
 	QCheckBox *    m_scatterTurn;
+	QComboBox *    m_waterfallLook;    // waterfall
+	QCheckBox *    m_waterfallFlip;
 	QCheckBox *    m_slopeOn;          // Smart paint limits
 	QSpinBox *     m_slopeMin;
 	QSpinBox *     m_slopeMax;
@@ -136,7 +144,12 @@ private:
 	QPushButton *  m_check;
 	QLabel *       m_diagnostic;
 	QPushButton *  m_save;
-	QPushButton *  m_saveCopy;
+	QPushButton *  m_saveCopy;         // Save to my folder
+	QPushButton *  m_sendServer;
+	QLineEdit *    m_storageFolder;
+	QLineEdit *    m_serverFolder;
+	QPushButton *  m_storageBrowse;
+	QPushButton *  m_serverBrowse;
 	QPushButton *  m_revert;
 	QLabel *       m_fileStatus;
 	QTimer *       m_timer;
