@@ -54,6 +54,20 @@ public slots:
 	void onRiverDepthChanged (const QString & text);
 	void onShapeActivated (int index);
 	void onSmoothStrengthChanged (int value);
+	void onLimitsChanged ();
+	void onLimitsChangedInt (int value);
+	void onLimitsChangedText (const QString & text);
+	void onLimitsChangedBool (bool on);
+	void onHeightLimitToggled (bool on);
+	void onFloraScatterChanged (int value);
+	void onFlattenSelection ();
+	void onLoadImage ();
+	void onScatterChangedInt (int value);
+	void onScatterChangedBool (bool on);
+	void onStampChanged ();
+	void onStampChangedInt (int value);
+	void onStampChangedBool (bool on);
+	void onStampChangedText (const QString & text);
 	void onUndo ();
 	void onRedo ();
 	void onRemoveAll ();
@@ -93,6 +107,27 @@ private:
 	QLineEdit *    m_riverDepth;
 	QComboBox *    m_shape;
 	QSpinBox *     m_smoothStrength;
+	QSpinBox *     m_floraScatter;
+	QPushButton *  m_flattenSelection;
+	QLabel *       m_clipboardLabel;   // stamp
+	QPushButton *  m_loadImage;
+	QSpinBox *     m_stampRotation;
+	QCheckBox *    m_stampMirror;
+	QSpinBox *     m_stampScale;
+	QSpinBox *     m_imageSize;
+	QLineEdit *    m_imageHeight;
+	QLabel *       m_scatterTemplate;  // object scatter
+	QSpinBox *     m_scatterSpacing;
+	QCheckBox *    m_scatterTurn;
+	QCheckBox *    m_slopeOn;          // Smart paint limits
+	QSpinBox *     m_slopeMin;
+	QSpinBox *     m_slopeMax;
+	QCheckBox *    m_heightOn;
+	QLineEdit *    m_heightLow;
+	QLineEdit *    m_heightHigh;
+	QComboBox *    m_onTexture;
+	std::vector<int> m_onTextureIds;   // shader family per entry (0 = any)
+	QLabel *       m_limitsNote;
 	QLabel *       m_status;
 	QListBox *     m_editList;
 	QPushButton *  m_undo;

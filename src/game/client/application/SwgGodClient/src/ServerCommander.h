@@ -41,6 +41,7 @@ public:
 	                      ServerCommander();
 	Object*               createObject(const std::string& name, const std::string& templateName, const CellProperty* cellProperty, const Transform& transform, bool pushUndo = true);
 	unsigned int          deleteObject(ClientObject* obj, bool pushUndo = true);
+	unsigned int          destroyObjectById(const std::string& networkIdString);   // terrain editor: works even when the object is out of view
 
 	//-----------------------------------------------------------------
 	//-- GodClientObjectManipulator stuff

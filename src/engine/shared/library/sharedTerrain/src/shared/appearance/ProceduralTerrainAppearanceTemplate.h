@@ -88,6 +88,10 @@ public:
 	//-- replace the baked static collidable flora (tree) maps at run time, e.g. the God Client terrain
 	//-- editor. Both arrays hold getMapWidthInFlora ()^2 values (row = tile z). Main thread only.
 	void                    setStaticCollidableFloraMaps (const int* familyIds, const float* heights);
+
+	//-- God Client terrain editor: flora tile borders (how far from the tile edge bushes/rocks and
+	//-- grass stay; smaller = more scattered). Saved with the template. Negative = unchanged.
+	void                    setFloraTileBorders (float nonCollidableBorder, float radialBorder, float farRadialBorder);
 	bool					getWaterHeight (const Vector& position, float& height, TerrainGeneratorWaterType& waterType, bool ignoreNonTransparentWater = false) const;
 	TerrainGeneratorWaterType getWaterType (const Vector& position_w) const;
 

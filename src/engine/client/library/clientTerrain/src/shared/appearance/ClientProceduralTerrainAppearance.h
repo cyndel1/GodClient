@@ -436,6 +436,10 @@ public:
 	void                 addRunTimeWater (const TerrainGenerator::Layer* layer, int group);
 	void                 removeRunTimeWater (int group);
 
+	//-- God Client terrain editor: re-place bushes/rocks and grass with new tile borders
+	//-- (smaller border = more scattered). A negative value leaves that manager alone.
+	void                 setFloraTileBorders (float nonCollidableBorder, float radialBorder, float farRadialBorder);
+
 	void                 setChunkLotShader (int chunkX, int chunkZ, const Shader* lotShader) const;
 	void                 clearLotShaders ();
 

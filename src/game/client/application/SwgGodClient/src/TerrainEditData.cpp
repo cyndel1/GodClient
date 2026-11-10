@@ -8,7 +8,20 @@
 #include "SwgGodClient/FirstSwgGodClient.h"
 #include "TerrainEditData.h"
 
+#include "ActionsEdit.h"
+#include "GodClientData.h"
+#include "ServerCommander.h"
+#include "sharedMath/Transform.h"
+#include "sharedObject/World.h"
+#include "clientGame/ClientObject.h"
 #include "clientGame/Game.h"
+#include "clientGraphics/Graphics.h"
+#include "sharedMath/VectorArgb.h"
+#include "sharedCollision/BoxExtent.h"
+#include "sharedCollision/Extent.h"
+#include "sharedMath/Sphere.h"
+#include "sharedObject/Appearance.h"
+#include "sharedObject/CellProperty.h"
 #include "clientGame/GroundScene.h"
 #include "clientTerrain/ClientProceduralTerrainAppearance.h"
 #include "clientTerrain/ClientRadialFloraManager.h"
@@ -26,6 +39,7 @@
 #include "sharedTerrain/AffectorRoad.h"
 #include "sharedTerrain/AffectorShader.h"
 #include "sharedTerrain/Boundary.h"
+#include "sharedTerrain/Filter.h"
 #include "sharedTerrain/ShaderGroup.h"
 #include "sharedUtility/PackedIntegerMap.h"
 #include "sharedTerrain/ProceduralTerrainAppearance.h"
@@ -37,6 +51,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <set>
 #include <string>
 
 // ======================================================================
@@ -73,6 +88,10 @@ namespace TerrainEditDataNamespace
 		case TerrainEditData::T_river:      return "River";
 		case TerrainEditData::T_water:      return "Water level";
 		case TerrainEditData::T_smooth:     return "Smooth";
+		case TerrainEditData::T_ramp:       return "Ramp";
+		case TerrainEditData::T_copy:       return "Copy ground";
+		case TerrainEditData::T_stamp:      return "Stamp";
+		case TerrainEditData::T_scatter:    return "Object scatter";
 		default:                            return "Edit";
 		}
 	}
@@ -145,6 +164,17 @@ TerrainEditData::TerrainEditData () :
 	m_smoothStrength (1.0f),
 	m_waterShader (),
 	m_shape (SH_brush),
+	m_clipboard (),
+	m_stampRotation (0.0f),
+	m_stampMirror (false),
+	m_stampHeightScale (1.0f),
+	m_imageSize (128.0f),
+	m_imageHeight (20.0f),
+	m_scatter (),
+	m_strokeScatter (),
+	m_scatterSpacing (8.0f),
+	m_scatterRandomTurn (true),
+	m_lastScatterScan (0),
 	m_brushMode (false),
 	m_appearance (0),
 	m_appearanceTemplate (0),
@@ -159,6 +189,8 @@ TerrainEditData::TerrainEditData () :
 	m_strokeSamples (),
 	m_strokeFloraPointsCleared (0),
 	m_strokeShape (SH_brush),
+	m_strokeOutlineReady (false),
+	m_strokeNameOverride (),
 	m_strokeTreeTiles (),
 	m_strokeTreeHeights (),
 	m_strokeTreeOldHeights (),
@@ -236,6 +268,98 @@ bool TerrainEditData::takeMessage (std::string & message)
 	return true;
 }
 TerrainEditData::Shape TerrainEditData::getShape () const { return m_shape; }
+
+void TerrainEditData::setLimits (const Limits & limits)
+{
+	m_limits = limits;
+	m_limits.m_slopeMin = std::max (0.0f, std::min (90.0f, m_limits.m_slopeMin));
+	m_limits.m_slopeMax = std::max (m_limits.m_slopeMin, std::min (90.0f, m_limits.m_slopeMax));
+	if (m_limits.m_heightHigh < m_limits.m_heightLow)
+		std::swap (m_limits.m_heightLow, m_limits.m_heightHigh);
+}
+
+const TerrainEditData::Limits & TerrainEditData::getLimits () const { return m_limits; }
+
+namespace TerrainEditDataNamespace
+{
+	//-- the largest border the flora managers accept (just under half a tile)
+	inline float maximumFloraBorder (const float tileSize) { return std::max (0.0f, tileSize * 0.5f - 0.05f); }
+}
+
+int TerrainEditData::getFloraScatter ()
+{
+	ClientProceduralTerrainAppearance * const appearance = getAppearance ();
+	const ProceduralTerrainAppearanceTemplate * const terrainTemplate = appearance ? dynamic_cast<const ProceduralTerrainAppearanceTemplate *> (appearance->getAppearanceTemplate ()) : 0;
+	if (!terrainTemplate)
+		return -1;
+
+	const float largest = TerrainEditDataNamespace::maximumFloraBorder (terrainTemplate->getNonCollidableTileSize ());
+	if (largest <= 0.0f)
+		return 100;
+	const float fraction = 1.0f - std::max (0.0f, std::min (largest, terrainTemplate->getNonCollidableTileBorder ())) / largest;
+	return static_cast<int> (fraction * 100.0f + 0.5f);
+}
+
+void TerrainEditData::setFloraScatter (const int percent)
+{
+	ClientProceduralTerrainAppearance * const appearance = getAppearance ();
+	const ProceduralTerrainAppearanceTemplate * const terrainTemplate = appearance ? dynamic_cast<const ProceduralTerrainAppearanceTemplate *> (appearance->getAppearanceTemplate ()) : 0;
+	if (!terrainTemplate)
+		return;
+
+	const float keep = 1.0f - static_cast<float> (std::max (0, std::min (100, percent))) / 100.0f;
+	const float nonCollidable = TerrainEditDataNamespace::maximumFloraBorder (terrainTemplate->getNonCollidableTileSize ()) * keep;
+	const float radial        = TerrainEditDataNamespace::maximumFloraBorder (terrainTemplate->getRadialTileSize ()) * keep;
+	const float farRadial     = TerrainEditDataNamespace::maximumFloraBorder (terrainTemplate->getFarRadialTileSize ()) * keep;
+
+	logEvent ("FLORA SCATTER %d%%: bushes/rocks tile %.1f m border %.2f -> %.2f; grass tile %.1f m border %.2f -> %.2f; far grass tile %.1f m border %.2f -> %.2f",
+		percent, terrainTemplate->getNonCollidableTileSize (), terrainTemplate->getNonCollidableTileBorder (), nonCollidable,
+		terrainTemplate->getRadialTileSize (), terrainTemplate->getRadialTileBorder (), radial,
+		terrainTemplate->getFarRadialTileSize (), terrainTemplate->getFarRadialTileBorder (), farRadial);
+
+	const_cast<ProceduralTerrainAppearanceTemplate *> (terrainTemplate)->setFloraTileBorders (nonCollidable, radial, farRadial);
+	appearance->setFloraTileBorders (nonCollidable, radial, farRadial);
+	m_unsaved = true;
+	++m_revision;
+}
+
+bool TerrainEditData::toolUsesLimits (const Tool tool)
+{
+	return tool == T_paint || tool == T_plantFlora || tool == T_clearFlora || tool == T_scatter;
+}
+
+bool TerrainEditData::kindUsesLimits (const StrokeKind kind)
+{
+	return kind == SK_paint || kind == SK_plant || kind == SK_flora || kind == SK_tree || kind == SK_scatter;
+}
+
+std::string TerrainEditData::describeLimits (const Limits & limits)
+{
+	if (!limits.any ())
+		return std::string ();
+
+	std::string text;
+	char part [96];
+	if (limits.m_slopeOn)
+	{
+		IGNORE_RETURN (_snprintf (part, sizeof (part), "slope %.0f-%.0f deg", limits.m_slopeMin, limits.m_slopeMax));
+		part [sizeof (part) - 1] = '\0';
+		text += part;
+	}
+	if (limits.m_heightOn)
+	{
+		IGNORE_RETURN (_snprintf (part, sizeof (part), "%sheight %.1f-%.1f m", text.empty () ? "" : ", ", limits.m_heightLow, limits.m_heightHigh));
+		part [sizeof (part) - 1] = '\0';
+		text += part;
+	}
+	if (limits.m_onTexture > 0)
+	{
+		IGNORE_RETURN (_snprintf (part, sizeof (part), "%sonly on texture #%d", text.empty () ? "" : ", ", limits.m_onTexture));
+		part [sizeof (part) - 1] = '\0';
+		text += part;
+	}
+	return text;
+}
 void TerrainEditData::setPaintFamily (const int id)     { m_paintFamilyId = id; }
 int  TerrainEditData::getPaintFamily () const           { return m_paintFamilyId; }
 
@@ -695,6 +819,28 @@ TerrainGenerator::Layer * TerrainEditData::buildStrokeLayer () const
 		IGNORE_RETURN (_snprintf (name, sizeof (name), "godclient_edit_%04d Smooth %.0f%% (r %.0f)", m_nameCounter, m_strokeParam * 100.0f, m_radius));
 		break;
 
+	case SK_scatter:
+		{
+			std::string shortName (getScatterTemplate ());
+			const size_t slash = shortName.find_last_of ('/');
+			if (slash != std::string::npos)
+				shortName = shortName.substr (slash + 1);
+			IGNORE_RETURN (_snprintf (name, sizeof (name), "godclient_edit_%04d Scatter %d x %s (every %.0f m, %.0f%%) (r %.0f)", m_nameCounter, static_cast<int> (m_strokeScatter.size ()), shortName.c_str (), m_scatterSpacing, m_strokeParam * 100.0f, m_radius));
+		}
+		break;
+
+	case SK_stamp:
+		IGNORE_RETURN (_snprintf (name, sizeof (name), "godclient_edit_%04d Stamp %s (turned %.0f deg%s, height x%.2f)", m_nameCounter, m_clipboard.m_name.c_str (),
+			m_stampRotation, m_stampMirror ? ", mirrored" : "", m_stampHeightScale));
+		break;
+
+	case SK_ramp:
+		{
+			const float length = m_strokePoints.size () >= 2 ? m_strokePoints.front ().magnitudeBetween (m_strokePoints.back ()) : 0.0f;
+			IGNORE_RETURN (_snprintf (name, sizeof (name), "godclient_edit_%04d Ramp %.1f m -> %.1f m, %.0f m long (w %.0f)", m_nameCounter, m_strokeHeight, m_strokeParam, length, m_radius * 2.0f));
+		}
+		break;
+
 	case SK_water:
 		IGNORE_RETURN (_snprintf (name, sizeof (name), "godclient_edit_%04d Water level %.1f m, %.1f m deep (r %.0f)", m_nameCounter, m_strokeHeight, m_strokeParam, m_radius));
 		break;
@@ -709,8 +855,15 @@ TerrainGenerator::Layer * TerrainEditData::buildStrokeLayer () const
 	}
 	name [sizeof (name) - 1] = '\0';
 
+	//-- strokes made in code (Flatten under selection) bring their own name
+	if (!m_strokeNameOverride.empty ())
+	{
+		IGNORE_RETURN (_snprintf (name, sizeof (name), "godclient_edit_%04d %s", m_nameCounter, m_strokeNameOverride.c_str ()));
+		name [sizeof (name) - 1] = '\0';
+	}
+
 	//-- shapes: describe the shape instead of the brush size
-	if (m_strokeShape != SH_brush && m_strokePoints.size () >= 3)
+	if (m_strokeNameOverride.empty () && m_strokeShape != SH_brush && m_strokePoints.size () >= 3)
 	{
 		char * const tail = strstr (name, " (r ");
 		if (tail)
@@ -722,7 +875,15 @@ TerrainGenerator::Layer * TerrainEditData::buildStrokeLayer () const
 		}
 	}
 
-	return createLayer (name, m_strokePoints, m_strokeKind, m_strokeOperation, m_strokeHeight, m_strokeFamilyId, m_radius, m_feather, m_strokeParam, m_strokeParam2, m_strokeSubKind, m_strokeSamples, m_waterShader.c_str (), m_strokeShape);
+	//-- Smart paint: say which limits the stroke used
+	if (m_strokeLimits.any ())
+	{
+		const size_t used = strlen (name);
+		IGNORE_RETURN (_snprintf (name + used, sizeof (name) - used, " [%s]", describeLimits (m_strokeLimits).c_str ()));
+		name [sizeof (name) - 1] = '\0';
+	}
+
+	return createLayer (name, m_strokePoints, m_strokeKind, m_strokeOperation, m_strokeHeight, m_strokeFamilyId, m_radius, m_feather, m_strokeParam, m_strokeParam2, m_strokeSubKind, m_strokeSamples, m_waterShader.c_str (), m_strokeShape, m_strokeLimits);
 }
 
 // ----------------------------------------------------------------------
@@ -1022,9 +1183,821 @@ bool TerrainEditData::bakeSmooth ()
 
 // ----------------------------------------------------------------------
 
+bool TerrainEditData::sampleGroundGrid (const Rectangle2d & area, const int margin, float & spacing, int & gx0, int & gz0, int & nx, int & nz, std::vector<float> & ground)
+{
+	//-- the ground on the terrain's own pole grid over the area (plus a margin in poles), sampled in
+	//-- blocks of exactly the client's chunk pole count (see bakeSmooth for why). The spacing starts
+	//-- at the finest pole spacing and doubles for very large areas (at most ~6000 poles).
+	const ProceduralTerrainAppearanceTemplate * const terrainTemplate = m_appearance ? dynamic_cast<const ProceduralTerrainAppearanceTemplate *> (m_appearance->getAppearanceTemplate ()) : 0;
+	const TerrainGenerator * const generator = terrainTemplate ? terrainTemplate->getTerrainGenerator () : 0;
+	if (!generator)
+		return false;
+
+	spacing = std::max (0.5f, terrainTemplate->getTileWidthInMeters () * 0.5f);
+	while (((area.x1 - area.x0) / spacing + 1.0f) * ((area.y1 - area.y0) / spacing + 1.0f) > 6000.0f)
+		spacing *= 2.0f;
+
+	gx0 = static_cast<int> (floorf (area.x0 / spacing)) - margin;
+	gz0 = static_cast<int> (floorf (area.y0 / spacing)) - margin;
+	const int gx1 = static_cast<int> (ceilf (area.x1 / spacing)) + margin;
+	const int gz1 = static_cast<int> (ceilf (area.y1 / spacing)) + margin;
+	nx = gx1 - gx0 + 1;
+	nz = gz1 - gz0 + 1;
+	ground.assign (static_cast<size_t> (nx * nz), 0.0f);
+
+	const int block = 2 * terrainTemplate->getNumberOfTilesPerChunk () + terrainTemplate->getChunkOriginOffset () + terrainTemplate->getChunkUpperPad ();
+	if (block < 2)
+		return false;
+	TerrainGenerator::CreateChunkBuffer chunkBuffer;
+	chunkBuffer.allocate (block);
+	for (int bz = 0; bz < nz; bz += block)
+		for (int bx = 0; bx < nx; bx += block)
+		{
+			TerrainGenerator::GeneratorChunkData cd (terrainTemplate->getLegacyMode ());
+			cd.shaderGroup                 = &generator->getShaderGroup ();
+			cd.floraGroup                  = &generator->getFloraGroup ();
+			cd.radialGroup                 = &generator->getRadialGroup ();
+			cd.environmentGroup            = &generator->getEnvironmentGroup ();
+			cd.fractalGroup                = &generator->getFractalGroup ();
+			cd.bitmapGroup                 = &generator->getBitmapGroup ();
+			cd.heightMap                   = &chunkBuffer.heightMap;
+			cd.colorMap                    = &chunkBuffer.colorMap;
+			cd.shaderMap                   = &chunkBuffer.shaderMap;
+			cd.floraStaticCollidableMap    = &chunkBuffer.floraStaticCollidableMap;
+			cd.floraStaticNonCollidableMap = &chunkBuffer.floraStaticNonCollidableMap;
+			cd.floraDynamicNearMap         = &chunkBuffer.floraDynamicNearMap;
+			cd.floraDynamicFarMap          = &chunkBuffer.floraDynamicFarMap;
+			cd.environmentMap              = &chunkBuffer.environmentMap;
+			cd.vertexPositionMap           = &chunkBuffer.vertexPositionMap;
+			cd.vertexNormalMap             = &chunkBuffer.vertexNormalMap;
+			cd.excludeMap                  = &chunkBuffer.excludeMap;
+			cd.passableMap                 = &chunkBuffer.passableMap;
+			cd.start                       = Vector (static_cast<float> (gx0 + bx) * spacing, 0.0f, static_cast<float> (gz0 + bz) * spacing);
+			cd.originOffset                = 0;
+			cd.upperPad                    = 0;
+			cd.numberOfPoles               = block;
+			cd.distanceBetweenPoles        = spacing;
+			generator->generateChunk (cd);
+
+			for (int z = 0; z < block && bz + z < nz; ++z)
+				for (int x = 0; x < block && bx + x < nx; ++x)
+					ground [static_cast<size_t> ((bz + z) * nx + bx + x)] = chunkBuffer.heightMap.getData (x, z);
+		}
+
+	return true;
+}
+
+// ----------------------------------------------------------------------
+
+bool TerrainEditData::bakeRamp ()
+{
+	//-- a straight slope from the ground at the start of the drag to the ground at the end, as wide
+	//-- as the brush (size x 2), fading into the ground over the soft edge at the sides. Baked on the
+	//-- pole grid like Smooth, so it cuts into hills and fills hollows along the way.
+	m_strokeSamples.points.clear ();
+	m_strokeSamples.counts.clear ();
+
+	if (m_strokePoints.size () < 2 || m_strokePoints.front ().magnitudeBetween (m_strokePoints.back ()) < 2.0f)
+	{
+		m_message = "Ramp: drag from one end of the ramp to the other (at least 2 m).";
+		return false;
+	}
+
+	const Vector2d a = m_strokePoints.front ();
+	const Vector2d b = m_strokePoints.back ();
+	m_strokePoints.clear ();
+	m_strokePoints.push_back (a);
+	m_strokePoints.push_back (b);
+
+	const float heightA = m_appearance->generateHeight_expensive (a);
+	const float heightB = m_appearance->generateHeight_expensive (b);
+	const float length  = a.magnitudeBetween (b);
+	const Vector2d direction ((b.x - a.x) / length, (b.y - a.y) / length);
+
+	float spacing = 0.0f;
+	int gx0 = 0, gz0 = 0, nx = 0, nz = 0;
+	std::vector<float> ground;
+	if (!sampleGroundGrid (pointExtent (m_strokePoints, 0, m_radius), 0, spacing, gx0, gz0, nx, nz, ground))
+		return false;
+
+	const float inner = m_radius * (1.0f - m_feather);
+	float largest = 0.0f;
+	for (int z = 0; z < nz; ++z)
+		for (int x = 0; x < nx; ++x)
+		{
+			const Vector2d p (static_cast<float> (gx0 + x) * spacing, static_cast<float> (gz0 + z) * spacing);
+			const float rx = p.x - a.x;
+			const float rz = p.y - a.y;
+			const float along = rx * direction.x + rz * direction.y;
+			if (along < 0.0f || along > length)
+				continue;
+			const float side = fabsf (rx * direction.y - rz * direction.x);
+			if (side >= m_radius)
+				continue;
+
+			float weight = side <= inner ? 1.0f : 1.0f - (side - inner) / std::max (0.001f, m_radius - inner);
+			weight = weight * weight * (3.0f - 2.0f * weight);
+
+			const size_t index = static_cast<size_t> (z * nx + x);
+			const float target = heightA + (heightB - heightA) * (along / length);
+			const float change = (target - ground [index]) * weight;
+			if (!_finite (change) || !_finite (ground [index]) || fabsf (change) < 0.02f)
+				continue;
+			largest = std::max (largest, fabsf (change));
+			m_strokeSamples.points.push_back (Vector (p.x, ground [index] + change, p.y));
+		}
+
+	m_strokeHeight = heightA;
+	m_strokeParam  = heightB;
+	m_strokeParam2 = spacing * 0.5f;
+
+	const float slopeDegrees = atanf (fabsf (heightB - heightA) / length) * (180.0f / PI);
+	logEvent ("RAMP %.1f %.1f (%.1f m) -> %.1f %.1f (%.1f m): %.0f m long, slope %.1f deg, %d patches, pole spacing %.1f m, largest change %.2f m",
+		a.x, a.y, heightA, b.x, b.y, heightB, length, slopeDegrees, static_cast<int> (m_strokeSamples.points.size ()), spacing, largest);
+
+	if (m_strokeSamples.points.empty ())
+	{
+		m_message = "Ramp: the ground here already follows that slope (nothing moved more than 2 cm).";
+		return false;
+	}
+
+	char note [200];
+	IGNORE_RETURN (_snprintf (note, sizeof (note), "Ramp: %.0f m long from %.1f m to %.1f m (%.1f deg slope); the ground moved by up to %.1f m.", length, heightA, heightB, slopeDegrees, largest));
+	note [sizeof (note) - 1] = '\0';
+	m_message = note;
+	return true;
+}
+
+// ----------------------------------------------------------------------
+
+int TerrainEditData::flattenUnderSelection ()
+{
+	if (m_strokeActive)
+		endStroke ();
+
+	if (getStatus () != S_ok)
+	{
+		m_message = "Flatten under selection: not on a ground planet, or terrain editing is disabled.";
+		return 0;
+	}
+
+	GodClientData::ObjectList_t selection;
+	GodClientData::getInstance ().getSelection (selection);
+	if (selection.empty ())
+	{
+		m_message = "Flatten under selection: select one or more objects first (untick Terrain brush on to select).";
+		return 0;
+	}
+
+	const float margin = 1.0f;                     // flat ground beyond the footprint
+	const float rim    = std::max (1.0f, m_radius); // the slope back to the old ground: Brush size
+	const float savedFeather = m_feather;
+	int made = 0;
+	std::string names;
+
+	for (GodClientData::ObjectList_t::const_iterator i = selection.begin (); i != selection.end (); ++i)
+	{
+		const ClientObject * const object = *i;
+		if (!object || object->getParentCell () != CellProperty::getWorldCellProperty ())
+			continue;   // only objects standing in the world (not inside buildings)
+
+		//-- footprint in the object's own frame: its appearance box, or 70% of its bounding sphere
+		float x0 = -2.0f, x1 = 2.0f, z0 = -2.0f, z1 = 2.0f;
+		const Appearance * const appearance = object->getAppearance ();
+		const Extent * const extent = appearance ? appearance->getExtent () : 0;
+		const BoxExtent * const box = dynamic_cast<const BoxExtent *> (extent);
+		if (box)
+		{
+			x0 = box->getMin ().x;
+			x1 = box->getMax ().x;
+			z0 = box->getMin ().z;
+			z1 = box->getMax ().z;
+		}
+		else if (extent)
+		{
+			const Sphere & sphere = extent->getSphere ();
+			const float r = std::max (1.0f, sphere.getRadius () * 0.7f);
+			x0 = sphere.getCenter ().x - r;
+			x1 = sphere.getCenter ().x + r;
+			z0 = sphere.getCenter ().z - r;
+			z1 = sphere.getCenter ().z + r;
+		}
+
+		const float grow = margin + rim;
+		x0 -= grow;
+		x1 += grow;
+		z0 -= grow;
+		z1 += grow;
+
+		PointList outline;
+		const float cornersX [] = { x0, x1, x1, x0 };
+		const float cornersZ [] = { z0, z0, z1, z1 };
+		for (int c = 0; c < 4; ++c)
+		{
+			const Vector corner = object->rotateTranslate_o2w (Vector (cornersX [c], 0.0f, cornersZ [c]));
+			outline.push_back (Vector2d (corner.x, corner.z));
+		}
+
+		const float base     = object->getPosition_w ().y;
+		const float halfSize = 0.5f * std::min (x1 - x0, z1 - z0);
+		const char * const templateName = object->getObjectTemplateName ();
+		std::string shortName (templateName ? templateName : "object");
+		const size_t slash = shortName.find_last_of ('/');
+		if (slash != std::string::npos)
+			shortName = shortName.substr (slash + 1);
+
+		char label [200];
+		IGNORE_RETURN (_snprintf (label, sizeof (label), "Flatten under %s to %.1f m (%.0f x %.0f m, rim %.0f m)", shortName.c_str (), base, x1 - x0, z1 - z0, rim));
+		label [sizeof (label) - 1] = '\0';
+
+		//-- set up a shape stroke exactly as beginStroke would for Flatten, then finish it
+		clearRedo ();
+		++m_nameCounter;
+		m_strokeInverted   = false;
+		m_strokeKind       = SK_height;
+		m_strokeFamilyId   = 0;
+		m_strokeFloraPointsCleared = 0;
+		m_strokeParam      = 0.0f;
+		m_strokeParam2     = 0.0f;
+		m_strokeSubKind    = 0;
+		m_strokeSamples.points.clear ();
+		m_strokeSamples.counts.clear ();
+		m_strokeFloraPoints.clear ();
+		m_strokeFloraRadius = m_radius;
+		m_strokeShape      = SH_polygon;
+		m_strokeOutlineReady = true;
+		m_strokeNameOverride = label;
+		m_strokeLimits     = Limits ();
+		m_strokeTreeTiles.clear ();
+		m_strokeTreeHeights.clear ();
+		m_strokeTreeOldHeights.clear ();
+		m_strokeOperation  = TGO_replace;
+		m_strokeHeight     = base;
+		m_strokePoints     = outline;
+		m_strokePointsShown = 0;
+		m_strokeLayer      = 0;
+		m_strokeActive     = true;
+		m_feather          = std::max (0.0f, std::min (1.0f, rim / std::max (0.5f, halfSize)));   // soft edge = the rim
+
+		logEvent ("FLATTEN UNDER %s at %.1f %.1f: base %.2f m, footprint %.1f x %.1f m (box %s), rim %.1f m",
+			templateName ? templateName : "?", object->getPosition_w ().x, object->getPosition_w ().z, base, x1 - x0 - 2.0f * grow, z1 - z0 - 2.0f * grow, box ? "yes" : "no", rim);
+
+		const size_t before = m_edits.size ();
+		endStroke ();
+		m_feather = savedFeather;
+		m_strokeOutlineReady = false;
+		m_strokeNameOverride.clear ();
+
+		if (m_edits.size () > before)
+		{
+			++made;
+			if (names.size () < 120)
+				names += (names.empty () ? "" : ", ") + shortName;
+		}
+	}
+
+	m_feather = savedFeather;
+
+	char note [300];
+	if (made > 0)
+		IGNORE_RETURN (_snprintf (note, sizeof (note), "Flattened the ground under %d object%s (%s), each to its base height with a %.0f m rim (Brush size).", made, made == 1 ? "" : "s", names.c_str (), rim));
+	else
+		IGNORE_RETURN (_snprintf (note, sizeof (note), "Flatten under selection: nothing flattened (only objects standing outdoors can be used)."));
+	note [sizeof (note) - 1] = '\0';
+	m_message = note;
+	++m_revision;
+	return made;
+}
+
+// ----------------------------------------------------------------------
+
+bool  TerrainEditData::hasClipboard () const                 { return m_clipboard.m_valid; }
+void  TerrainEditData::setStampRotation (const float d)       { m_stampRotation = d - 360.0f * floorf (d / 360.0f); }
+float TerrainEditData::getStampRotation () const              { return m_stampRotation; }
+void  TerrainEditData::setStampMirror (const bool mirror)     { m_stampMirror = mirror; }
+bool  TerrainEditData::getStampMirror () const                { return m_stampMirror; }
+void  TerrainEditData::setStampHeightScale (const float s)    { m_stampHeightScale = std::max (-10.0f, std::min (10.0f, s)); }
+float TerrainEditData::getStampHeightScale () const           { return m_stampHeightScale; }
+void  TerrainEditData::setImageSize (const float m)           { m_imageSize = std::max (4.0f, std::min (1024.0f, m)); }
+float TerrainEditData::getImageSize () const                  { return m_imageSize; }
+void  TerrainEditData::setImageHeight (const float m)         { m_imageHeight = std::max (-500.0f, std::min (500.0f, m)); }
+float TerrainEditData::getImageHeight () const                { return m_imageHeight; }
+
+std::string TerrainEditData::describeClipboard () const
+{
+	if (!m_clipboard.m_valid)
+		return "Clipboard: empty. Use Copy ground (drag a rectangle) or Load heightmap image.";
+
+	char text [300];
+	if (m_clipboard.m_isImage)
+		IGNORE_RETURN (_snprintf (text, sizeof (text), "Clipboard: image %s (%d x %d pixels), stamped %.0f m wide, white = %.1f m.",
+			m_clipboard.m_name.c_str (), m_clipboard.m_width, m_clipboard.m_height, m_imageSize, m_imageHeight));
+	else
+	{
+		float low = 0.0f;
+		float high = 0.0f;
+		for (std::vector<float>::const_iterator i = m_clipboard.m_values.begin (); i != m_clipboard.m_values.end (); ++i)
+		{
+			low  = std::min (low, *i);
+			high = std::max (high, *i);
+		}
+		IGNORE_RETURN (_snprintf (text, sizeof (text), "Clipboard: %s, %.0f x %.0f m, %+.1f to %+.1f m from its edge.",
+			m_clipboard.m_name.c_str (), m_clipboard.m_sizeX, m_clipboard.m_sizeZ, low, high));
+	}
+	text [sizeof (text) - 1] = '\0';
+	return text;
+}
+
+void TerrainEditData::setClipboardFromImage (const char * const name, const int width, const int height, const std::vector<float> & values01)
+{
+	if (width < 2 || height < 2 || static_cast<int> (values01.size ()) != width * height)
+	{
+		m_message = "Load heightmap image: the image is too small or could not be read.";
+		return;
+	}
+
+	m_clipboard.m_valid   = true;
+	m_clipboard.m_isImage = true;
+	m_clipboard.m_name    = name ? name : "image";
+	m_clipboard.m_width   = width;
+	m_clipboard.m_height  = height;
+	m_clipboard.m_sizeX   = 0.0f;
+	m_clipboard.m_sizeZ   = 0.0f;
+	m_clipboard.m_values  = values01;
+	logEvent ("CLIPBOARD image %s %d x %d", m_clipboard.m_name.c_str (), width, height);
+	m_message = describeClipboard () + " Choose Stamp and click to place it.";
+	++m_revision;
+}
+
+float TerrainEditData::sampleClipboard (const float u, const float v) const
+{
+	const int w = m_clipboard.m_width;
+	const int h = m_clipboard.m_height;
+	const float cu = std::max (0.0f, std::min (static_cast<float> (w - 1), u));
+	const float cv = std::max (0.0f, std::min (static_cast<float> (h - 1), v));
+	const int x0 = std::min (w - 2, static_cast<int> (cu));
+	const int z0 = std::min (h - 2, static_cast<int> (cv));
+	const float fx = cu - static_cast<float> (x0);
+	const float fz = cv - static_cast<float> (z0);
+	const std::vector<float> & d = m_clipboard.m_values;
+	const float a = d [static_cast<size_t> (z0 * w + x0)];
+	const float b = d [static_cast<size_t> (z0 * w + x0 + 1)];
+	const float c = d [static_cast<size_t> ((z0 + 1) * w + x0)];
+	const float e = d [static_cast<size_t> ((z0 + 1) * w + x0 + 1)];
+	return (a * (1.0f - fx) + b * fx) * (1.0f - fz) + (c * (1.0f - fx) + e * fx) * fz;
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditData::copyGround ()
+{
+	//-- the rectangle's ground on the pole grid, stored as metres above (or below) the average ground
+	//-- along its edge, so a stamp can sit it on any ground
+	const Rectangle2d area = pointExtent (m_strokePoints, 0, 0.0f);
+	const float sizeX = area.x1 - area.x0;
+	const float sizeZ = area.y1 - area.y0;
+	if (sizeX < 4.0f || sizeZ < 4.0f)
+	{
+		m_message = "Copy ground: drag a rectangle at least 4 m each way.";
+		return;
+	}
+	if (sizeX > 512.0f || sizeZ > 512.0f)
+	{
+		m_message = "Copy ground: the rectangle is too big (at most 512 m each way).";
+		return;
+	}
+
+	float spacing = 0.0f;
+	int gx0 = 0, gz0 = 0, nx = 0, nz = 0;
+	std::vector<float> ground;
+	if (!sampleGroundGrid (area, 0, spacing, gx0, gz0, nx, nz, ground) || nx < 2 || nz < 2)
+	{
+		m_message = "Copy ground: could not read the ground there.";
+		return;
+	}
+
+	double edgeSum = 0.0;
+	int edgeCount = 0;
+	for (int z = 0; z < nz; ++z)
+		for (int x = 0; x < nx; ++x)
+			if (x == 0 || z == 0 || x == nx - 1 || z == nz - 1)
+			{
+				edgeSum += ground [static_cast<size_t> (z * nx + x)];
+				++edgeCount;
+			}
+	const float edge = edgeCount > 0 ? static_cast<float> (edgeSum / edgeCount) : 0.0f;
+
+	m_clipboard.m_valid   = true;
+	m_clipboard.m_isImage = false;
+	char name [96];
+	IGNORE_RETURN (_snprintf (name, sizeof (name), "ground from %.0f, %.0f", (area.x0 + area.x1) * 0.5f, (area.y0 + area.y1) * 0.5f));
+	name [sizeof (name) - 1] = '\0';
+	m_clipboard.m_name   = name;
+	m_clipboard.m_width  = nx;
+	m_clipboard.m_height = nz;
+	m_clipboard.m_sizeX  = static_cast<float> (nx - 1) * spacing;
+	m_clipboard.m_sizeZ  = static_cast<float> (nz - 1) * spacing;
+	m_clipboard.m_values.resize (ground.size ());
+	for (size_t i = 0; i < ground.size (); ++i)
+		m_clipboard.m_values [i] = _finite (ground [i]) ? ground [i] - edge : 0.0f;
+
+	logEvent ("COPY ground %.1f %.1f .. %.1f %.1f: %d x %d poles at %.1f m, edge average %.2f m", area.x0, area.y0, area.x1, area.y1, nx, nz, spacing, edge);
+	m_message = describeClipboard () + " Choose Stamp and click to place it.";
+	++m_revision;
+}
+
+// ----------------------------------------------------------------------
+
+bool TerrainEditData::bakeStamp ()
+{
+	//-- the clipboard, turned / mirrored / scaled, centred on the click. It sits on the ground: its
+	//-- edge meets the average ground along its outline, and it fades in over the soft edge.
+	m_strokeSamples.points.clear ();
+	m_strokeSamples.counts.clear ();
+	if (!m_clipboard.m_valid || m_strokePoints.empty ())
+		return false;
+
+	const Vector2d centre = m_strokePoints.back ();
+	const bool  isImage = m_clipboard.m_isImage;
+	const float sizeX = isImage ? m_imageSize : m_clipboard.m_sizeX;
+	const float sizeZ = isImage ? m_imageSize * static_cast<float> (m_clipboard.m_height - 1) / static_cast<float> (std::max (1, m_clipboard.m_width - 1)) : m_clipboard.m_sizeZ;
+	const float halfX = sizeX * 0.5f;
+	const float halfZ = sizeZ * 0.5f;
+	const float angle = m_stampRotation * (PI / 180.0f);
+	const float cosA  = cosf (angle);
+	const float sinA  = sinf (angle);
+
+	//-- the four corners in the world (also the edit's outline)
+	PointList corners;
+	{
+		const float cx [] = { -halfX, halfX, halfX, -halfX };
+		const float cz [] = { -halfZ, -halfZ, halfZ, halfZ };
+		for (int c = 0; c < 4; ++c)
+			corners.push_back (Vector2d (centre.x + cx [c] * cosA - cz [c] * sinA, centre.y + cx [c] * sinA + cz [c] * cosA));
+	}
+
+	//-- the ground the stamp sits on: the average along its outline
+	float base = 0.0f;
+	{
+		int count = 0;
+		for (int c = 0; c < 4; ++c)
+		{
+			const Vector2d & p0 = corners [static_cast<size_t> (c)];
+			const Vector2d & p1 = corners [static_cast<size_t> ((c + 1) % 4)];
+			for (int s = 0; s < 8; ++s)
+			{
+				const float t = static_cast<float> (s) / 8.0f;
+				base += m_appearance->generateHeight_expensive (Vector2d (p0.x + (p1.x - p0.x) * t, p0.y + (p1.y - p0.y) * t));
+				++count;
+			}
+		}
+		base /= static_cast<float> (count);
+	}
+
+	float spacing = 0.0f;
+	int gx0 = 0, gz0 = 0, nx = 0, nz = 0;
+	std::vector<float> ground;
+	if (!sampleGroundGrid (pointExtent (corners, 0, 0.0f), 0, spacing, gx0, gz0, nx, nz, ground))
+		return false;
+
+	const float featherWidth = std::max (spacing, m_feather * std::min (halfX, halfZ));
+	const float heightScale  = isImage ? m_imageHeight * m_stampHeightScale : m_stampHeightScale;
+	float largest = 0.0f;
+	float highest = -FLT_MAX;
+	float lowest  = FLT_MAX;
+	for (int z = 0; z < nz; ++z)
+		for (int x = 0; x < nx; ++x)
+		{
+			const Vector2d p (static_cast<float> (gx0 + x) * spacing, static_cast<float> (gz0 + z) * spacing);
+			const float dx = p.x - centre.x;
+			const float dz = p.y - centre.y;
+			float lx =  dx * cosA + dz * sinA;
+			const float lz = -dx * sinA + dz * cosA;
+			if (m_stampMirror)
+				lx = -lx;
+			if (fabsf (lx) > halfX || fabsf (lz) > halfZ)
+				continue;
+
+			float weight = std::min (1.0f, std::min (halfX - fabsf (lx), halfZ - fabsf (lz)) / featherWidth);
+			weight = weight * weight * (3.0f - 2.0f * weight);
+
+			const float u = (lx + halfX) / std::max (0.001f, sizeX) * static_cast<float> (m_clipboard.m_width - 1);
+			//-- images: the top row is north (+z); copied ground: row 0 is the south edge
+			const float v = (isImage ? (halfZ - lz) : (lz + halfZ)) / std::max (0.001f, sizeZ) * static_cast<float> (m_clipboard.m_height - 1);
+			const float desired = base + sampleClipboard (u, v) * heightScale;
+
+			const size_t index = static_cast<size_t> (z * nx + x);
+			const float change = (desired - ground [index]) * weight;
+			if (!_finite (change) || !_finite (ground [index]) || fabsf (change) < 0.02f)
+				continue;
+			largest = std::max (largest, fabsf (change));
+			highest = std::max (highest, ground [index] + change);
+			lowest  = std::min (lowest, ground [index] + change);
+			m_strokeSamples.points.push_back (Vector (p.x, ground [index] + change, p.y));
+		}
+
+	m_strokePoints = corners;
+	m_strokeHeight = base;
+	m_strokeParam  = heightScale;
+	m_strokeParam2 = spacing * 0.5f;
+
+	logEvent ("STAMP %s at %.1f %.1f: %.0f x %.0f m, turned %.0f deg%s, height scale %.2f, base %.2f m, %d patches at %.1f m, largest change %.2f m",
+		m_clipboard.m_name.c_str (), centre.x, centre.y, sizeX, sizeZ, m_stampRotation, m_stampMirror ? " mirrored" : "", heightScale, base,
+		static_cast<int> (m_strokeSamples.points.size ()), spacing, largest);
+
+	if (m_strokeSamples.points.empty ())
+	{
+		m_message = "Stamp: nothing changed (the stamp is flat here, or matches the ground).";
+		return false;
+	}
+
+	char note [240];
+	IGNORE_RETURN (_snprintf (note, sizeof (note), "Stamp: %.0f x %.0f m on ground at %.1f m; the new ground runs from %.1f m to %.1f m (moved by up to %.1f m).",
+		sizeX, sizeZ, base, lowest, highest, largest));
+	note [sizeof (note) - 1] = '\0';
+	m_message = note;
+	return true;
+}
+
+// ----------------------------------------------------------------------
+
+void  TerrainEditData::setScatterSpacing (const float m)     { m_scatterSpacing = std::max (1.0f, std::min (200.0f, m)); }
+float TerrainEditData::getScatterSpacing () const            { return m_scatterSpacing; }
+void  TerrainEditData::setScatterRandomTurn (const bool on)  { m_scatterRandomTurn = on; }
+bool  TerrainEditData::getScatterRandomTurn () const         { return m_scatterRandomTurn; }
+
+std::string TerrainEditData::getScatterTemplate ()
+{
+	//-- the Tree Browser gives "static/flora/xyz"; the server wants "object/static/flora/xyz.iff"
+	//-- (as GameWidget::createObjectFromTemplate builds it for Ctrl+N)
+	std::string name = ActionsEdit::getInstance ().getSelectedServerTemplate ();
+	if (name.empty ())
+		return name;
+	if (name.compare (0, 7, "object/") != 0)
+		name = "object/" + name;
+	if (name.size () < 4 || _stricmp (name.c_str () + name.size () - 4, ".iff") != 0)
+		name += ".iff";
+	return name;
+}
+
+// ----------------------------------------------------------------------
+
+bool TerrainEditData::bakeScatter ()
+{
+	//-- one candidate spot per Object spacing cell, at a random place inside it (so no rows), kept
+	//-- at Plant density and where the limits pass; snapped to the ground, with a random turn
+	m_strokeScatter.clear ();
+
+	const std::string selected = getScatterTemplate ();
+	if (selected.empty () || m_strokePoints.empty ())
+		return false;
+
+	//-- the server command wants the server template; the client sees the shared one
+	std::string serverTemplate (selected);
+	std::string sharedTemplate (selected);
+	{
+		const size_t slash = selected.find_last_of ('/');
+		const std::string folder = slash == std::string::npos ? std::string () : selected.substr (0, slash + 1);
+		const std::string file   = slash == std::string::npos ? selected : selected.substr (slash + 1);
+		if (file.compare (0, 7, "shared_") == 0)
+			serverTemplate = folder + file.substr (7);
+		else
+			sharedTemplate = folder + "shared_" + file;
+	}
+
+	const bool isShape = m_strokeShape != SH_brush;
+	const PointList & points = m_strokePoints;
+	const Rectangle2d area = pointExtent (points, 0, isShape ? 0.0f : m_radius);
+	const float radiusSquared = m_radius * m_radius;
+	const float spacing = m_scatterSpacing;
+	const int   maximum = 250;
+
+	const int gx0 = static_cast<int> (floorf (area.x0 / spacing));
+	const int gx1 = static_cast<int> (floorf (area.x1 / spacing));
+	const int gz0 = static_cast<int> (floorf (area.y0 / spacing));
+	const int gz1 = static_cast<int> (floorf (area.y1 / spacing));
+
+	int limitedOut = 0;
+	bool capped = false;
+	for (int gz = gz0; gz <= gz1 && !capped; ++gz)
+		for (int gx = gx0; gx <= gx1; ++gx)
+		{
+			RandomGenerator random (static_cast<uint32> (gx * 73856093) ^ static_cast<uint32> (gz * 19349663) ^ (static_cast<uint32> (m_nameCounter) * 83492791u));
+			const Vector2d p ((static_cast<float> (gx) + random.randomReal (0.f, 1.f)) * spacing, (static_cast<float> (gz) + random.randomReal (0.f, 1.f)) * spacing);
+			const float pick = random.randomReal (0.f, 1.f);
+			const float yaw  = m_scatterRandomTurn ? random.randomReal (0.f, PI_TIMES_2) : 0.0f;
+
+			if (isShape ? !isInsidePolygon (p, points) : distanceSquaredToPolyline (p, points) > radiusSquared)
+				continue;
+			if (pick >= m_strokeParam)
+				continue;
+			if (m_strokeLimits.any () && !passesLimits (p, m_strokeLimits))
+			{
+				++limitedOut;
+				continue;
+			}
+
+			ScatterItem item;
+			item.m_serverTemplate = serverTemplate;
+			item.m_sharedTemplate = sharedTemplate;
+			item.m_position       = Vector (p.x, m_appearance->generateHeight_expensive (p), p.y);
+			item.m_yaw            = yaw;
+			m_strokeScatter.push_back (item);
+			if (static_cast<int> (m_strokeScatter.size ()) >= maximum)
+			{
+				capped = true;
+				break;
+			}
+		}
+
+	logEvent ("SCATTER %d x %s (server %s): spacing %.1f m, density %.0f%%, %d left out by the limits%s",
+		static_cast<int> (m_strokeScatter.size ()), sharedTemplate.c_str (), serverTemplate.c_str (), spacing, m_strokeParam * 100.0f, limitedOut, capped ? ", capped at 250" : "");
+
+	if (m_strokeScatter.empty ())
+	{
+		m_message = limitedOut > 0 ? "Object scatter: no spot here passes the limits." : "Object scatter: no spot inside the area (try a smaller Object spacing, a bigger brush or a higher density).";
+		return false;
+	}
+
+	char note [240];
+	IGNORE_RETURN (_snprintf (note, sizeof (note), "Object scatter: creating %d objects on the server%s. Undo removes them once the server has sent them back.",
+		static_cast<int> (m_strokeScatter.size ()), capped ? " (the most one stroke makes; paint again for more)" : ""));
+	note [sizeof (note) - 1] = '\0';
+	m_message = note;
+	return true;
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditData::createScatterObjects (const int strokeId)
+{
+	std::map<int, ScatterList>::iterator found = m_scatter.find (strokeId);
+	if (found == m_scatter.end ())
+		return;
+
+	int sent = 0;
+	for (ScatterList::iterator i = found->second.begin (); i != found->second.end (); ++i)
+	{
+		if (i->m_live)
+			continue;
+		Transform transform;
+		transform.yaw_l (i->m_yaw);
+		transform.setPosition_p (i->m_position);
+		IGNORE_RETURN (ServerCommander::getInstance ().createObject ("terrain editor scatter", i->m_serverTemplate, CellProperty::getWorldCellProperty (), transform, false));
+		i->m_live           = true;
+		i->m_id.clear ();
+		i->m_deleteWhenSeen = false;
+		i->m_createdAt      = now ();
+		++sent;
+	}
+	logEvent ("SCATTER stroke %d: sent %d create commands", strokeId, sent);
+	m_lastScatterScan = 0;
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditData::removeScatterObjects (const int strokeId)
+{
+	std::map<int, ScatterList>::iterator found = m_scatter.find (strokeId);
+	if (found == m_scatter.end ())
+		return;
+
+	int destroyed = 0;
+	int waiting = 0;
+	for (ScatterList::iterator i = found->second.begin (); i != found->second.end (); ++i)
+	{
+		if (!i->m_live)
+			continue;
+		if (!i->m_id.empty ())
+		{
+			IGNORE_RETURN (ServerCommander::getInstance ().destroyObjectById (i->m_id));
+			i->m_id.clear ();
+			++destroyed;
+		}
+		else
+		{
+			i->m_deleteWhenSeen = true;   // not back from the server yet: destroy it when it arrives
+			++waiting;
+		}
+		i->m_live = false;
+	}
+	logEvent ("SCATTER stroke %d: destroyed %d objects, %d more will be destroyed when the server sends them", strokeId, destroyed, waiting);
+	if (waiting > 0)
+	{
+		char note [200];
+		IGNORE_RETURN (_snprintf (note, sizeof (note), "Object scatter undone: %d objects destroyed; %d not back from the server yet will be destroyed when they arrive.", destroyed, waiting));
+		note [sizeof (note) - 1] = '\0';
+		m_message = note;
+	}
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditData::updateScatter ()
+{
+	if (m_scatter.empty () || now () - m_lastScatterScan < 500)
+		return;
+	m_lastScatterScan = now ();
+
+	//-- anything still waiting for the server (give up after 2 minutes)
+	bool waiting = false;
+	for (std::map<int, ScatterList>::iterator s = m_scatter.begin (); s != m_scatter.end () && !waiting; ++s)
+		for (ScatterList::iterator i = s->second.begin (); i != s->second.end (); ++i)
+			if (i->m_id.empty () && (i->m_live || i->m_deleteWhenSeen) && now () - i->m_createdAt < 120000)
+			{
+				waiting = true;
+				break;
+			}
+	if (!waiting)
+		return;
+
+	//-- ids already claimed by a placement
+	std::set<std::string> claimed;
+	for (std::map<int, ScatterList>::iterator s = m_scatter.begin (); s != m_scatter.end (); ++s)
+		for (ScatterList::iterator i = s->second.begin (); i != s->second.end (); ++i)
+			if (!i->m_id.empty ())
+				claimed.insert (i->m_id);
+
+	int matched = 0;
+	//-- static objects (flora trees, rocks) may be in the not-targetable or flora lists
+	const int lists [] = { static_cast<int> (WOL_Tangible), static_cast<int> (WOL_TangibleNotTargetable), static_cast<int> (WOL_TangibleFlora) };
+	for (int l = 0; l < 3; ++l)
+	for (int o = 0; o < World::getNumberOfObjects (lists [l]); ++o)
+	{
+		const Object * const object = World::getConstObject (lists [l], o);
+		if (!object || !object->getNetworkId ().isValid ())
+			continue;
+		const Vector position = object->getPosition_w ();
+
+		for (std::map<int, ScatterList>::iterator s = m_scatter.begin (); s != m_scatter.end (); ++s)
+			for (ScatterList::iterator i = s->second.begin (); i != s->second.end (); ++i)
+			{
+				if (!i->m_id.empty () || (!i->m_live && !i->m_deleteWhenSeen))
+					continue;
+				const float dx = position.x - i->m_position.x;
+				const float dz = position.z - i->m_position.z;
+				if (dx * dx + dz * dz > 0.16f)
+					continue;
+				const char * const templateName = object->getObjectTemplateName ();
+				if (!templateName || _stricmp (templateName, i->m_sharedTemplate.c_str ()) != 0)
+					continue;
+				const std::string id = object->getNetworkId ().getValueString ();
+				if (claimed.find (id) != claimed.end ())
+					continue;
+
+				claimed.insert (id);
+				++matched;
+				if (i->m_deleteWhenSeen)
+				{
+					IGNORE_RETURN (ServerCommander::getInstance ().destroyObjectById (id));
+					i->m_deleteWhenSeen = false;
+				}
+				else
+					i->m_id = id;
+				goto nextObject;
+			}
+nextObject:
+		;
+	}
+
+	if (matched > 0)
+		logEvent ("SCATTER matched %d objects sent back by the server", matched);
+
+	//-- a stroke where the server sent nothing back after 15 s: say so once (wrong template, no
+	//-- god rights, or the objects are out of view)
+	for (std::map<int, ScatterList>::iterator s = m_scatter.begin (); s != m_scatter.end (); ++s)
+	{
+		if (s->second.empty () || m_scatterWarned.find (s->first) != m_scatterWarned.end ())
+			continue;
+		int live = 0;
+		int seen = 0;
+		unsigned long newest = 0;
+		for (ScatterList::const_iterator i = s->second.begin (); i != s->second.end (); ++i)
+			if (i->m_live)
+			{
+				++live;
+				if (!i->m_id.empty ())
+					++seen;
+				newest = std::max (newest, i->m_createdAt);
+			}
+		if (live == 0 || seen > 0 || now () - newest < 15000)
+			continue;
+
+		m_scatterWarned.insert (s->first);
+		logEvent ("SCATTER stroke %d: the server has not sent back any of the %d objects after 15 s (template %s)", s->first, live, s->second.front ().m_serverTemplate.c_str ());
+		char note [300];
+		IGNORE_RETURN (_snprintf (note, sizeof (note), "Object scatter: the server hasn't created any of the %d objects (template %s). Check that Ctrl+N works with this template, and that the account has god rights.",
+			live, s->second.front ().m_serverTemplate.c_str ()));
+		note [sizeof (note) - 1] = '\0';
+		m_message = note;
+	}
+}
+
+// ----------------------------------------------------------------------
+
 bool TerrainEditData::changesHeight (const StrokeKind kind)
 {
-	return kind == SK_height || kind == SK_roughen || kind == SK_terrace || kind == SK_road || kind == SK_river || kind == SK_water || kind == SK_smooth;
+	return kind == SK_height || kind == SK_roughen || kind == SK_terrace || kind == SK_road || kind == SK_river || kind == SK_water || kind == SK_smooth || kind == SK_ramp || kind == SK_stamp;
 }
 
 // ----------------------------------------------------------------------
@@ -1169,6 +2142,7 @@ bool TerrainEditData::bakeTrees ()
 	const int tz1 = static_cast<int> (floorf (area.y1 / tileWidth)) + 1;
 
 	int occupied = 0;
+	int limitedOut = 0;
 	for (int tz = tz0; tz <= tz1; ++tz)
 		for (int tx = tx0; tx <= tx1; ++tx)
 		{
@@ -1199,6 +2173,13 @@ bool TerrainEditData::bakeTrees ()
 			if (pick.randomReal (0.f, 1.f) >= m_strokeParam)
 				continue;
 
+			//-- Smart paint limits: checked once, at the tree's own spot
+			if (m_strokeLimits.any () && !passesLimits (tree, m_strokeLimits))
+			{
+				++limitedOut;
+				continue;
+			}
+
 			m_strokeTreeTiles.push_back (tile);
 			m_strokeTreeHeights.push_back (m_appearance->generateHeight_expensive (tree));
 			m_strokeTreeOldHeights.push_back (m_treeHeightMap [static_cast<size_t> (tile)]);
@@ -1206,19 +2187,181 @@ bool TerrainEditData::bakeTrees ()
 				break;
 		}
 
-	logEvent ("TREES planting %d (family %d, density %.0f%%); %d tiles in the area already had a tree", static_cast<int> (m_strokeTreeTiles.size ()), m_strokeFamilyId, m_strokeParam * 100.0f, occupied);
+	logEvent ("TREES planting %d (family %d, density %.0f%%); %d tiles in the area already had a tree; %d spots left out by the limits%s%s", static_cast<int> (m_strokeTreeTiles.size ()), m_strokeFamilyId, m_strokeParam * 100.0f, occupied, limitedOut,
+		m_strokeLimits.any () ? " " : "", describeLimits (m_strokeLimits).c_str ());
 
 	if (m_strokeTreeTiles.empty ())
 	{
-		m_message = occupied > 0 ? "Plant trees: every 16 m tile here already has a tree (one tree per tile)." : "Plant trees: no tree spot inside the area (trees go one per 16 m tile; try a bigger brush or a higher density).";
+		m_message = limitedOut > 0 ? "Plant trees: no tree spot here passes the limits (slope / height / texture)."
+			: occupied > 0 ? "Plant trees: every 16 m tile here already has a tree (one tree per tile)." : "Plant trees: no tree spot inside the area (trees go one per 16 m tile; try a bigger brush or a higher density).";
 		return false;
 	}
 
-	char note [160];
-	IGNORE_RETURN (_snprintf (note, sizeof (note), "Planted %d trees (one per 16 m tile at most).", static_cast<int> (m_strokeTreeTiles.size ())));
+	char note [200];
+	if (limitedOut > 0)
+		IGNORE_RETURN (_snprintf (note, sizeof (note), "Planted %d trees (one per 16 m tile at most); %d spots were left out by the limits.", static_cast<int> (m_strokeTreeTiles.size ()), limitedOut));
+	else
+		IGNORE_RETURN (_snprintf (note, sizeof (note), "Planted %d trees (one per 16 m tile at most).", static_cast<int> (m_strokeTreeTiles.size ())));
 	note [sizeof (note) - 1] = '\0';
 	m_message = note;
 	return true;
+}
+
+// ----------------------------------------------------------------------
+
+bool TerrainEditData::sampleGround (const Vector2d & position_w, float & height, float & slopeDegrees, int & shaderFamily)
+{
+	//-- runs the generator (every layer, ours included) on a tiny patch at the terrain's own pole
+	//-- spacing, so slope and texture come out as the engine's filters see them. The patch is the
+	//-- same size generateHeight_expensive uses, which keeps it inside the fractal caches.
+	const ProceduralTerrainAppearanceTemplate * const terrainTemplate = m_appearance ? dynamic_cast<const ProceduralTerrainAppearanceTemplate *> (m_appearance->getAppearanceTemplate ()) : 0;
+	const TerrainGenerator * const generator = terrainTemplate ? terrainTemplate->getTerrainGenerator () : 0;
+	if (!generator)
+		return false;
+
+	const int   originOffset  = terrainTemplate->getChunkOriginOffset ();
+	const int   upperPad      = terrainTemplate->getChunkUpperPad ();
+	const int   numberOfPoles = 2 + originOffset + upperPad;
+	const float spacing       = terrainTemplate->getTileWidthInMeters () * 0.5f;
+
+	static TerrainGenerator::CreateChunkBuffer s_buffer;
+	static int s_bufferPoles = 0;
+	if (s_bufferPoles != numberOfPoles)
+	{
+		s_buffer.allocate (numberOfPoles);
+		s_bufferPoles = numberOfPoles;
+	}
+
+	TerrainGenerator::GeneratorChunkData data (terrainTemplate->getLegacyMode ());
+	data.shaderGroup                 = &generator->getShaderGroup ();
+	data.floraGroup                  = &generator->getFloraGroup ();
+	data.radialGroup                 = &generator->getRadialGroup ();
+	data.environmentGroup            = &generator->getEnvironmentGroup ();
+	data.fractalGroup                = &generator->getFractalGroup ();
+	data.bitmapGroup                 = &generator->getBitmapGroup ();
+	data.heightMap                   = &s_buffer.heightMap;
+	data.colorMap                    = &s_buffer.colorMap;
+	data.shaderMap                   = &s_buffer.shaderMap;
+	data.floraStaticCollidableMap    = &s_buffer.floraStaticCollidableMap;
+	data.floraStaticNonCollidableMap = &s_buffer.floraStaticNonCollidableMap;
+	data.floraDynamicNearMap         = &s_buffer.floraDynamicNearMap;
+	data.floraDynamicFarMap          = &s_buffer.floraDynamicFarMap;
+	data.environmentMap              = &s_buffer.environmentMap;
+	data.vertexPositionMap           = &s_buffer.vertexPositionMap;
+	data.vertexNormalMap             = &s_buffer.vertexNormalMap;
+	data.excludeMap                  = &s_buffer.excludeMap;
+	data.passableMap                 = &s_buffer.passableMap;
+	data.start                       = Vector (position_w.x - static_cast<float> (originOffset) * spacing, 0.0f, position_w.y - static_cast<float> (originOffset) * spacing);
+	data.originOffset                = originOffset;
+	data.upperPad                    = upperPad;
+	data.numberOfPoles               = numberOfPoles;
+	data.distanceBetweenPoles        = spacing;
+
+	generator->generateChunk (data);
+
+	const int c  = originOffset;
+	const int x0 = c > 0 ? c - 1 : c;
+	const int x1 = c + 1;
+	height = s_buffer.heightMap.getData (c, c);
+	const float dx = (s_buffer.heightMap.getData (x1, c) - s_buffer.heightMap.getData (x0, c)) / (static_cast<float> (x1 - x0) * spacing);
+	const float dz = (s_buffer.heightMap.getData (c, x1) - s_buffer.heightMap.getData (c, x0)) / (static_cast<float> (x1 - x0) * spacing);
+	slopeDegrees = atanf (sqrtf (dx * dx + dz * dz)) * (180.0f / PI);
+	shaderFamily = s_buffer.shaderMap.getData (c, c).getFamilyId ();
+	return true;
+}
+
+// ----------------------------------------------------------------------
+
+bool TerrainEditData::passesLimits (const Vector2d & position_w, const Limits & limits)
+{
+	if (!limits.any ())
+		return true;
+
+	float height = 0.0f;
+	float slope  = 0.0f;
+	int   shader = 0;
+	if (!sampleGround (position_w, height, slope, shader))
+		return true;
+
+	if (limits.m_heightOn && (height < limits.m_heightLow || height > limits.m_heightHigh))
+		return false;
+	if (limits.m_slopeOn && (slope < limits.m_slopeMin || slope > limits.m_slopeMax))
+		return false;
+	if (limits.m_onTexture > 0 && shader != limits.m_onTexture)
+		return false;
+	return true;
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditData::bakeLimitedClear ()
+{
+	//-- Clear flora with limits: the stroke layer's filters remove generated flora where the ground
+	//-- passes the limits, but baked trees are cleared with the engine's clear circles, which know
+	//-- nothing of slopes or textures. So each baked tree in the area is checked once, and a small
+	//-- clear circle is put on each tree that passes.
+	m_strokeFloraPoints.clear ();
+	m_strokeFloraRadius = 1.5f;
+
+	const ProceduralTerrainAppearanceTemplate * const terrainTemplate = m_appearance ? dynamic_cast<const ProceduralTerrainAppearanceTemplate *> (m_appearance->getAppearanceTemplate ()) : 0;
+	if (!terrainTemplate || !loadTreeMaps () || m_strokePoints.empty ())
+	{
+		logEvent ("CLEAR limited: no baked tree map (only terrain-rule flora is cleared) %s", describeLimits (m_strokeLimits).c_str ());
+		return;
+	}
+
+	const float tileWidth    = 16.0f;
+	const float tileBorder   = terrainTemplate->getCollidableTileBorder ();
+	const int   width        = m_treeMapWidth;
+	const int   centerOffset = width / 2;
+
+	const bool isShape = m_strokeShape != SH_brush;
+	const PointList & points = m_strokePoints;
+	const Rectangle2d area = pointExtent (points, 0, isShape ? 0.0f : m_radius);
+	const float radiusSquared = m_radius * m_radius;
+
+	const int tx0 = static_cast<int> (floorf (area.x0 / tileWidth)) - 1;
+	const int tx1 = static_cast<int> (floorf (area.x1 / tileWidth)) + 1;
+	const int tz0 = static_cast<int> (floorf (area.y0 / tileWidth)) - 1;
+	const int tz1 = static_cast<int> (floorf (area.y1 / tileWidth)) + 1;
+
+	int kept = 0;
+	for (int tz = tz0; tz <= tz1 && m_strokeFloraPoints.size () < 4000; ++tz)
+		for (int tx = tx0; tx <= tx1; ++tx)
+		{
+			const int keyX = tx + centerOffset;
+			const int keyZ = tz + centerOffset;
+			if (keyX < 0 || keyZ < 0 || keyX >= width || keyZ >= width)
+				continue;
+
+			const int tile = keyZ * width + keyX;
+			if (m_treeFamilies [static_cast<size_t> (tile)] == 0)
+				continue;
+
+			RandomGenerator random (static_cast<uint32> (tile));
+			const float xOffset = random.randomReal (0.f, 1.f);
+			const float zOffset = random.randomReal (0.f, 1.f);
+			const Vector2d tree (static_cast<float> (tx) * tileWidth + tileBorder + xOffset * (tileWidth - 2.0f * tileBorder),
+			                     static_cast<float> (tz) * tileWidth + tileBorder + zOffset * (tileWidth - 2.0f * tileBorder));
+
+			if (isShape ? !isInsidePolygon (tree, points) : distanceSquaredToPolyline (tree, points) > radiusSquared)
+				continue;
+
+			if (passesLimits (tree, m_strokeLimits))
+				m_strokeFloraPoints.push_back (tree);
+			else
+				++kept;
+
+			if (m_strokeFloraPoints.size () >= 4000)
+				break;
+		}
+
+	logEvent ("CLEAR limited: %d baked trees pass the limits and are cleared, %d are kept (%s)", static_cast<int> (m_strokeFloraPoints.size ()), kept, describeLimits (m_strokeLimits).c_str ());
+
+	char note [200];
+	IGNORE_RETURN (_snprintf (note, sizeof (note), "Clear flora with limits: %d trees cleared, %d kept; bushes and grass follow the limits too.", static_cast<int> (m_strokeFloraPoints.size ()), kept));
+	note [sizeof (note) - 1] = '\0';
+	m_message = note;
 }
 
 // ----------------------------------------------------------------------
@@ -1258,15 +2401,94 @@ TerrainGenerator::Layer * TerrainEditData::createSmoothLayer (const char * const
 
 // ----------------------------------------------------------------------
 
-TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name, const PointList & points, const StrokeKind kind, const TerrainGeneratorOperation operation, const float height, const int familyId, const float radius, const float feather, const float param, const float param2, const int subKind, const PathSamples & samples, const char * const waterShader, const Shape shape)
+TerrainGenerator::Layer * TerrainEditData::addLimitLayers (TerrainGenerator::Layer * const layer, const Limits & limits)
+{
+	//-- Smart paint. The engine's filters fade in over a band at each end of their range, and they
+	//-- leave out the exact ends (flat ground has a slope of exactly 0 degrees), so:
+	//--   height and "steeper than" go on the stroke layer itself;
+	//--   "flatter than" (slope 0..max) is a sublayer whose filter "max..90" is inverted;
+	//--   "only on texture" goes on the innermost sublayer, with the affectors (the engine only
+	//--   brings the texture map up to date for a layer that has affectors).
+	//-- Sublayers get the parent's strength, so the stroke's own soft edge still applies.
+	TerrainGenerator::Layer * target = layer;
+
+	if (limits.m_heightOn)
+	{
+		FilterHeight * const filter = new FilterHeight ();
+		filter->setName ("godclient_limit_height");
+		filter->setLowHeight (limits.m_heightLow);
+		filter->setHighHeight (limits.m_heightHigh);
+		filter->setFeatherFunction (TGFF_easeInOut);
+		//-- fade over about 1 m at each end (the feather is a share of half the range)
+		const float range = std::max (0.01f, limits.m_heightHigh - limits.m_heightLow);
+		filter->setFeatherDistance (std::max (0.0f, std::min (1.0f, 2.0f / range)));
+		target->addFilter (filter);
+	}
+
+	if (limits.m_slopeOn)
+	{
+		const float minimum = std::max (0.0f, std::min (90.0f, limits.m_slopeMin));
+		const float maximum = std::max (minimum, std::min (90.0f, limits.m_slopeMax));
+		const float toRadians = PI / 180.0f;
+
+		if (minimum > 0.25f)
+		{
+			//-- "between min and max" (max 90 = "steeper than min"); vertical ground never occurs
+			FilterSlope * const filter = new FilterSlope ();
+			filter->setName ("godclient_limit_slope");
+			filter->setMinimumAngle (minimum * toRadians);
+			filter->setMaximumAngle (std::min (90.0f, maximum + 0.01f) * toRadians);
+			filter->setFeatherFunction (TGFF_easeInOut);
+			filter->setFeatherDistance (0.1f);
+			target->addFilter (filter);
+		}
+		else if (maximum < 89.75f)
+		{
+			//-- "flatter than max": everywhere except slopes from max to 90
+			FilterSlope * const filter = new FilterSlope ();
+			filter->setName ("godclient_limit_slope_not_steeper");
+			filter->setMinimumAngle (maximum * toRadians);
+			filter->setMaximumAngle (90.0f * toRadians);
+			filter->setFeatherFunction (TGFF_easeInOut);
+			filter->setFeatherDistance (0.05f);
+
+			TerrainGenerator::Layer * const sublayer = new TerrainGenerator::Layer ();
+			sublayer->setName ("godclient_limit_slope_layer");
+			sublayer->addFilter (filter);
+			sublayer->setInvertFilters (true);
+			target->addLayer (sublayer);
+			target = sublayer;
+		}
+		//-- 0..90 limits nothing
+	}
+
+	if (limits.m_onTexture > 0)
+	{
+		FilterShader * const filter = new FilterShader ();
+		filter->setName ("godclient_limit_texture");
+		filter->setFamilyId (limits.m_onTexture);
+
+		TerrainGenerator::Layer * const sublayer = new TerrainGenerator::Layer ();
+		sublayer->setName ("godclient_limit_texture_layer");
+		sublayer->addFilter (filter);
+		target->addLayer (sublayer);
+		target = sublayer;
+	}
+
+	return target;
+}
+
+// ----------------------------------------------------------------------
+
+TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name, const PointList & points, const StrokeKind kind, const TerrainGeneratorOperation operation, const float height, const int familyId, const float radius, const float feather, const float param, const float param2, const int subKind, const PathSamples & samples, const char * const waterShader, const Shape shape, const Limits & limits)
 {
 	if (kind == SK_road || kind == SK_river)
 		return createPathLayer (name, points, kind, familyId, radius, feather, param, samples, waterShader);
 
-	if (kind == SK_smooth)
+	if (kind == SK_smooth || kind == SK_ramp || kind == SK_stamp)
 		return createSmoothLayer (name, samples, param2);
 
-	if (kind == SK_tree)
+	if (kind == SK_tree || kind == SK_scatter)
 	{
 		//-- trees live in the baked flora map; the layer only marks the edit (no boundaries or
 		//-- affectors, so the generator skips it). It is never saved.
@@ -1321,6 +2543,9 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 		layer->addBoundary (boundary);
 	}
 
+	//-- Smart paint limits: the affectors go into the innermost limit sublayer
+	TerrainGenerator::Layer * const target = (kindUsesLimits (kind) && limits.any ()) ? addLimitLayers (layer, limits) : layer;
+
 	switch (kind)
 	{
 	case SK_water:
@@ -1332,7 +2557,7 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 			basin->setName ("godclient_lake_basin");
 			basin->setOperation (TGO_replace);
 			basin->setHeight (height - param);
-			layer->addAffector (basin);
+			target->addAffector (basin);
 		}
 		break;
 
@@ -1341,7 +2566,7 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 			AffectorShaderConstant * const affector = new AffectorShaderConstant ();
 			affector->setName ("godclient_paint");
 			affector->setFamilyId (familyId);
-			layer->addAffector (affector);
+			target->addAffector (affector);
 
 			//-- the planet's colour layers tint every texture (desert colour-ramp fractals give the
 			//-- ground its patchy look), which leaves dark/blotchy areas on the painted texture.
@@ -1350,7 +2575,7 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 			tint->setName ("godclient_paint_neutral_tint");
 			tint->setOperation (TGO_replace);
 			tint->setColor (PackedRgb::solidWhite);
-			layer->addAffector (tint);
+			target->addAffector (tint);
 		}
 		break;
 
@@ -1361,22 +2586,22 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 			AffectorFloraStaticCollidableConstant * const collidable = new AffectorFloraStaticCollidableConstant ();
 			collidable->setName ("godclient_clear_collidable");
 			collidable->setRemoveAll (true);
-			layer->addAffector (collidable);
+			target->addAffector (collidable);
 
 			AffectorFloraStaticNonCollidableConstant * const nonCollidable = new AffectorFloraStaticNonCollidableConstant ();
 			nonCollidable->setName ("godclient_clear_noncollidable");
 			nonCollidable->setRemoveAll (true);
-			layer->addAffector (nonCollidable);
+			target->addAffector (nonCollidable);
 
 			AffectorFloraDynamicNearConstant * const nearFlora = new AffectorFloraDynamicNearConstant ();
 			nearFlora->setName ("godclient_clear_radial_near");
 			nearFlora->setRemoveAll (true);
-			layer->addAffector (nearFlora);
+			target->addAffector (nearFlora);
 
 			AffectorFloraDynamicFarConstant * const farFlora = new AffectorFloraDynamicFarConstant ();
 			farFlora->setName ("godclient_clear_radial_far");
 			farFlora->setRemoveAll (true);
-			layer->addAffector (farFlora);
+			target->addAffector (farFlora);
 		}
 		break;
 
@@ -1389,13 +2614,13 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 			fractal->setFamilyId (familyId);
 			fractal->setOperation (TGO_add);
 			fractal->setScaleY (param);
-			layer->addAffector (fractal);
+			target->addAffector (fractal);
 
 			AffectorHeightConstant * const centre = new AffectorHeightConstant ();
 			centre->setName ("godclient_roughen_centre");
 			centre->setOperation (TGO_subtract);
 			centre->setHeight (param * 0.5f);
-			layer->addAffector (centre);
+			target->addAffector (centre);
 		}
 		break;
 
@@ -1405,7 +2630,7 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 			terrace->setName ("godclient_terrace");
 			terrace->setHeight (param);
 			terrace->setFraction (param2);
-			layer->addAffector (terrace);
+			target->addAffector (terrace);
 		}
 		break;
 
@@ -1418,7 +2643,7 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 			grass->setOperation (TGO_add);
 			grass->setDensityOverride (true);
 			grass->setDensityOverrideDensity (param);
-			layer->addAffector (grass);
+			target->addAffector (grass);
 		}
 		else
 		{
@@ -1428,7 +2653,7 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 			flora->setOperation (TGO_add);
 			flora->setDensityOverride (true);
 			flora->setDensityOverrideDensity (param);
-			layer->addAffector (flora);
+			target->addAffector (flora);
 		}
 		break;
 
@@ -1439,7 +2664,7 @@ TerrainGenerator::Layer * TerrainEditData::createLayer (const char * const name,
 			affector->setName ("godclient_height");
 			affector->setOperation (operation);
 			affector->setHeight (height);
-			layer->addAffector (affector);
+			target->addAffector (affector);
 		}
 		break;
 	}
@@ -1555,7 +2780,18 @@ PackedIntegerMap * TerrainEditData::buildClearedFloraMap (const PackedIntegerMap
 				const Vector2d tree (static_cast<float> (keyX - centerOffset) * tileWidth + tileBorder + xOffset * (tileWidth - 2.0f * tileBorder),
 				                     static_cast<float> (keyZ - centerOffset) * tileWidth + tileBorder + zOffset * (tileWidth - 2.0f * tileBorder));
 
-				if (e->m_shape != SH_brush ? isInsidePolygon (tree, e->m_points) : distanceSquaredToPolyline (tree, e->m_points) <= radiusSquared)
+				//-- Smart paint limits: only the trees that passed (one small clear circle on each)
+				bool hit = false;
+				if (e->m_limits.any ())
+				{
+					const float floraRadiusSquared = e->m_floraRadius * e->m_floraRadius;
+					for (PointList::const_iterator f = e->m_floraPoints.begin (); f != e->m_floraPoints.end () && !hit; ++f)
+						hit = f->magnitudeBetweenSquared (tree) <= floraRadiusSquared;
+				}
+				else
+					hit = e->m_shape != SH_brush ? isInsidePolygon (tree, e->m_points) : distanceSquaredToPolyline (tree, e->m_points) <= radiusSquared;
+
+				if (hit)
 				{
 					value = 0;
 					++cleared;
@@ -1608,17 +2844,60 @@ bool TerrainEditData::beginStroke (const Vector2d & position_w, const bool alter
 	m_strokeSamples.counts.clear ();
 	m_strokeFloraPoints.clear ();
 	m_strokeFloraRadius = m_radius;
+	m_strokeOutlineReady = false;
+	m_strokeNameOverride.clear ();
 
-	//-- roads and rivers are always paths; water always fills a shape (a brush drag draws its outline)
-	if (m_tool == T_road || m_tool == T_river)
+	//-- roads, rivers and ramps are always paths; water always fills a shape (a brush drag draws its outline)
+	if (m_tool == T_road || m_tool == T_river || m_tool == T_ramp || m_tool == T_stamp)
 		m_strokeShape = SH_brush;
 	else if (m_tool == T_water && m_shape == SH_brush)
 		m_strokeShape = SH_polygon;
+	else if (m_tool == T_copy)
+		m_strokeShape = SH_rectangle;   // copy: always a rectangle, drag corner to corner
 	else
 		m_strokeShape = m_shape;
 
+	m_strokeScatter.clear ();
+
 	switch (m_tool)
 	{
+	case T_scatter:
+		if (getScatterTemplate ().empty ())
+		{
+			logEvent ("STROKE REFUSED scatter: no server template selected");
+			m_message = "Object scatter: select a server template first (Tree Browser, ServerTemplates tab; the same one Ctrl+N creates).";
+			return false;
+		}
+		m_strokeKind      = SK_scatter;
+		m_strokeOperation = TGO_replace;
+		m_strokeHeight    = 0.0f;
+		m_strokeParam     = m_plantDensity;
+		break;
+
+	case T_copy:
+		m_strokeKind      = SK_copy;
+		m_strokeOperation = TGO_replace;
+		m_strokeHeight    = 0.0f;
+		break;
+
+	case T_stamp:
+		if (!m_clipboard.m_valid)
+		{
+			logEvent ("STROKE REFUSED stamp: the clipboard is empty");
+			m_message = "Stamp: nothing to stamp yet. Use Copy ground (drag a rectangle) or Load heightmap image first.";
+			return false;
+		}
+		m_strokeKind      = SK_stamp;
+		m_strokeOperation = TGO_replace;
+		m_strokeHeight    = 0.0f;
+		break;
+
+	case T_ramp:
+		m_strokeKind      = SK_ramp;
+		m_strokeOperation = TGO_replace;
+		m_strokeHeight    = 0.0f;
+		break;
+
 	case T_smooth:
 		m_strokeKind      = SK_smooth;
 		m_strokeOperation = TGO_replace;
@@ -1747,6 +3026,18 @@ bool TerrainEditData::beginStroke (const Vector2d & position_w, const bool alter
 	if (m_strokeKind == SK_height && m_strokeOperation != TGO_replace && m_strokeHeight <= 0.0f)
 		return false;
 
+	m_strokeLimits = kindUsesLimits (m_strokeKind) ? m_limits : Limits ();
+	if (m_strokeLimits.any ())
+		logEvent ("STROKE LIMITS %s", describeLimits (m_strokeLimits).c_str ());
+
+	//-- painting a texture only where the ground already has that texture changes nothing
+	if (m_strokeKind == SK_paint && m_strokeLimits.m_onTexture > 0 && m_strokeLimits.m_onTexture == m_strokeFamilyId)
+	{
+		logEvent ("STROKE REFUSED paint: the paint texture and the 'only where the ground is already' texture are the same (#%d)", m_strokeFamilyId);
+		m_message = "Nothing to do: Paint texture and 'Only where the ground is already' are the same texture. The second list is the texture to paint OVER; set it to (any texture) or to the texture you want to replace.";
+		return false;
+	}
+
 	clearRedo ();
 
 	++m_nameCounter;
@@ -1770,6 +3061,23 @@ void TerrainEditData::continueStroke (const Vector2d & position_w)
 		return;
 
 	setCursor (position_w);
+
+	//-- stamp: one point, the centre (dragging moves it); built when the button is released
+	if (m_strokeKind == SK_stamp)
+	{
+		m_strokePoints.back () = position_w;
+		return;
+	}
+
+	//-- ramp: only the two ends matter (start and the current point); built when the drag ends
+	if (m_strokeKind == SK_ramp)
+	{
+		if (m_strokePoints.size () < 2)
+			m_strokePoints.push_back (position_w);
+		else
+			m_strokePoints.back () = position_w;
+		return;
+	}
 
 	//-- shapes are built when the drag ends. Rectangle / circle: first point + the current point.
 	//-- Polygon: the drag is the outline.
@@ -1829,7 +3137,7 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 		if (!force || m_strokeLayer)
 			return;
 
-		const PointList outline = buildOutline (m_strokeShape, m_strokePoints);
+		const PointList outline = m_strokeOutlineReady ? m_strokePoints : buildOutline (m_strokeShape, m_strokePoints);
 		if (outline.size () < 3)
 		{
 			const Rectangle2d dragExtent = pointExtent (m_strokePoints, 0, 0.0f);
@@ -1850,34 +3158,63 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 		if (m_strokeKind == SK_flora)
 			m_strokeFloraPoints = coverPoints (m_strokePoints, m_strokeFloraRadius);
 
-		//-- water below all of the ground inside the shape would be invisible: lift it to just
-		//-- above the lowest ground found (outline + inner grid), and show the new height in the panel
+		//-- the water surface only exists inside the outline, so it must stay below the shore all the
+		//-- way round, or it shows as a raised sheet standing above the bank. Highest allowed: the
+		//-- lowest ground on the outline minus a little. A height under all the ground inside
+		//-- (e.g. the box still at 0 m) means "fill it": just below the shore.
 		if (m_strokeKind == SK_water)
 		{
-			float lowest = FLT_MAX;
-			const int step = std::max (1, numberOfPoints / 32);
+			float lowestShore = FLT_MAX;
+			const int step = std::max (1, numberOfPoints / 64);
 			for (int i = 0; i < numberOfPoints; i += step)
-				lowest = std::min (lowest, m_appearance->generateHeight_expensive (m_strokePoints [static_cast<size_t> (i)]));
+				lowestShore = std::min (lowestShore, m_appearance->generateHeight_expensive (m_strokePoints [static_cast<size_t> (i)]));
+
+			float lowestInside = FLT_MAX;
 			float gridRadius = 0.0f;
 			const PointList inner = coverPoints (m_strokePoints, gridRadius);
-			const int innerStep = std::max (1, static_cast<int> (inner.size ()) / 32);
+			const int innerStep = std::max (1, static_cast<int> (inner.size ()) / 48);
 			for (size_t i = 0; i < inner.size (); i += static_cast<size_t> (innerStep))
 				if (isInsidePolygon (inner [i], m_strokePoints))
-					lowest = std::min (lowest, m_appearance->generateHeight_expensive (inner [i]));
+					lowestInside = std::min (lowestInside, m_appearance->generateHeight_expensive (inner [i]));
+			lowestInside = std::min (lowestInside, lowestShore);
 
-			if (lowest < FLT_MAX && m_strokeHeight <= lowest)
+			const float requested = m_strokeHeight;
+			const float shoreGap  = 0.3f;
+			const float highest   = lowestShore - shoreGap;
+			const char * reason   = 0;
+
+			if (lowestShore < FLT_MAX)
 			{
-				logEvent ("WATER height %.1f m is under all the ground in the shape (lowest %.1f m): using %.1f m", m_strokeHeight, lowest, lowest + 1.0f);
-				m_strokeHeight = lowest + 1.0f;
-				m_levelHeight  = m_strokeHeight;
-				char note [160];
-				IGNORE_RETURN (_snprintf (note, sizeof (note), "The water height was under all the ground there, so the lake was made at %.1f m (1 m above the lowest ground).", m_strokeHeight));
-				note [sizeof (note) - 1] = '\0';
+				if (requested <= lowestInside)
+				{
+					m_strokeHeight = highest;
+					reason = "it was under all the ground there, so the lake was filled to just below the shore";
+				}
+				else if (requested > highest)
+				{
+					m_strokeHeight = highest;
+					reason = "it was above the lowest point of the shore, so the water would have stood above the bank";
+				}
+			}
+
+			const bool hidden = m_strokeParam <= 0.0f && m_strokeHeight <= lowestInside;
+			logEvent ("WATER requested %.1f m, shore lowest %.1f m, inside lowest %.1f m: using %.1f m (basin %.1f m deep)%s",
+				requested, lowestShore, lowestInside, m_strokeHeight, m_strokeParam, hidden ? " - no dip inside and no depth: the water is under the ground" : "");
+
+			char note [260];
+			note [0] = '\0';
+			if (reason)
+				IGNORE_RETURN (_snprintf (note, sizeof (note), "Water at %.1f m, %.1f m below the lowest point of the shore (you asked for %.1f m; %s).", m_strokeHeight, shoreGap, requested, reason));
+			if (hidden)
+				IGNORE_RETURN (_snprintf (note, sizeof (note), "The ground inside is not lower than the shore, so the water is hidden under it. Set River/Lake depth above 0 to dig a basin."));
+			note [sizeof (note) - 1] = '\0';
+			if (note [0])
 				m_message = note;
+			if (m_strokeHeight != requested)
+			{
+				m_levelHeight = m_strokeHeight;
 				++m_revision;
 			}
-			else
-				logEvent ("WATER height %.1f m (lowest ground in the shape %.1f m)", m_strokeHeight, lowest);
 		}
 	}
 
@@ -1906,6 +3243,51 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 		if (!force || m_strokeLayer)
 			return;
 		if (!bakeSmooth ())
+			return;
+	}
+
+	//-- copy ground: the rectangle's heights go to the clipboard; no layer, so no edit
+	if (m_strokeKind == SK_copy)
+	{
+		if (force && !m_strokeLayer)
+			copyGround ();
+		return;
+	}
+
+	//-- stamp: built once, when the button is released, centred on the last point
+	if (m_strokeKind == SK_stamp)
+	{
+		if (!force || m_strokeLayer)
+			return;
+		if (!bakeStamp ())
+			return;
+		numberOfPoints = static_cast<int> (m_strokePoints.size ());   // now the stamp's four corners
+	}
+
+	//-- ramp: built once, when the drag ends, from the ground at the two ends
+	if (m_strokeKind == SK_ramp)
+	{
+		if (!force || m_strokeLayer)
+			return;
+		if (!bakeRamp ())
+			return;
+	}
+
+	//-- Clear flora with limits: built once, when the drag ends (each baked tree is checked)
+	const bool limitedFlora = m_strokeKind == SK_flora && m_strokeLimits.any ();
+	if (limitedFlora)
+	{
+		if (!force || m_strokeLayer)
+			return;
+		bakeLimitedClear ();
+	}
+
+	//-- object scatter: spots chosen once, when the drag ends; the objects are created in endStroke
+	if (m_strokeKind == SK_scatter)
+	{
+		if (!force || m_strokeLayer)
+			return;
+		if (!bakeScatter ())
 			return;
 	}
 
@@ -1962,7 +3344,7 @@ void TerrainEditData::swapStrokeLayer (const bool force)
 	m_lastActionCount = numberOfPoints;
 
 	//-- baked trees and rocks: clear around the new stroke points (main thread only)
-	if (m_strokeKind == SK_flora && isShape)
+	if (m_strokeKind == SK_flora && (isShape || limitedFlora))
 	{
 		addFloraClearing (m_nameCounter, m_strokeFloraPoints, 0, m_strokeFloraRadius);
 		m_lastAction      = "flora clearing (destroy/create trees)";
@@ -2008,14 +3390,98 @@ void TerrainEditData::endStroke ()
 		edit.m_samples   = m_strokeSamples;
 		edit.m_waterShader = m_waterShader;
 		edit.m_shape       = m_strokeShape;
-		edit.m_floraPoints = m_strokeShape != SH_brush ? m_strokeFloraPoints : m_strokePoints;
-		edit.m_floraRadius = m_strokeShape != SH_brush ? m_strokeFloraRadius : m_radius;
+		const bool floraFromList = m_strokeShape != SH_brush || (m_strokeKind == SK_flora && m_strokeLimits.any ());
+		edit.m_floraPoints = floraFromList ? m_strokeFloraPoints : m_strokePoints;
+		edit.m_floraRadius = floraFromList ? m_strokeFloraRadius : m_radius;
+		edit.m_limits      = m_strokeLimits;
 		edit.m_treeTiles      = m_strokeTreeTiles;
 		edit.m_treeHeights    = m_strokeTreeHeights;
 		edit.m_treeOldHeights = m_strokeTreeOldHeights;
 		m_edits.push_back (edit);
 		logStroke (edit);
 		m_unsaved = true;
+
+		//-- object scatter: send the create commands now that the edit exists
+		if (edit.m_kind == SK_scatter)
+		{
+			m_scatter [edit.m_strokeId] = m_strokeScatter;
+			m_strokeScatter.clear ();
+			createScatterObjects (edit.m_strokeId);
+		}
+
+		//-- Smart paint: say how much of the stroke passed the limits, and what the ground there is,
+		//-- so a stroke that did nothing explains itself (trees and Clear flora report their own counts)
+		if (edit.m_limits.any () && (edit.m_kind == SK_paint || edit.m_kind == SK_plant))
+		{
+			PointList spots;
+			if (edit.m_shape != SH_brush)
+			{
+				float gridRadius = 0.0f;
+				const PointList grid = coverPoints (edit.m_points, gridRadius);
+				for (PointList::const_iterator g = grid.begin (); g != grid.end (); ++g)
+					if (isInsidePolygon (*g, edit.m_points))
+						spots.push_back (*g);
+			}
+			else
+				spots = edit.m_points;
+
+			const int total = static_cast<int> (spots.size ());
+			const int checks = std::min (total, 16);
+			int passed = 0;
+			int passedAndPainted = 0;
+			int failedSlope = 0;
+			int failedHeight = 0;
+			int failedTexture = 0;
+			float firstHeight = 0.0f;
+			float firstSlope  = 0.0f;
+			int   firstShader = 0;
+			for (int c = 0; c < checks; ++c)
+			{
+				const int index = checks > 1 ? (c * (total - 1)) / (checks - 1) : 0;
+				float h = 0.0f;
+				float s = 0.0f;
+				int   t = 0;
+				if (!sampleGround (spots [static_cast<size_t> (index)], h, s, t))
+					continue;
+				if (c == 0)
+				{
+					firstHeight = h;
+					firstSlope  = s;
+					firstShader = t;
+				}
+				const bool slopeOk   = !edit.m_limits.m_slopeOn || (s >= edit.m_limits.m_slopeMin && s <= edit.m_limits.m_slopeMax);
+				const bool heightOk  = !edit.m_limits.m_heightOn || (h >= edit.m_limits.m_heightLow && h <= edit.m_limits.m_heightHigh);
+				const bool painted   = edit.m_kind == SK_paint && t == edit.m_familyId;   // sampled after painting: a passing spot already shows the new texture
+				const bool textureOk = edit.m_limits.m_onTexture <= 0 || t == edit.m_limits.m_onTexture || painted;
+				if (!slopeOk)   ++failedSlope;
+				if (!heightOk)  ++failedHeight;
+				if (!textureOk) ++failedTexture;
+				const bool ok = slopeOk && heightOk && textureOk;
+				if (ok)
+					++passed;
+				if (ok && painted)
+					++passedAndPainted;
+				logEvent ("  spot %.1f %.1f: height %.1f slope %.0f texture #%d -> %s%s", spots [static_cast<size_t> (index)].x, spots [static_cast<size_t> (index)].y, h, s, t,
+					ok ? "passes" : "outside", edit.m_kind == SK_paint ? (painted ? ", painted" : ", not painted") : "");
+			}
+
+			const char * const shaderName = getShaderFamilyName (firstShader);
+			logEvent ("LIMITS %d of %d checked spots pass (%s); paint landed on %d of the passing spots; failed: slope %d, height %d, texture %d; first spot: height %.1f m, slope %.0f deg, texture %s (#%d)",
+				passed, checks, describeLimits (edit.m_limits).c_str (), passedAndPainted, failedSlope, failedHeight, failedTexture, firstHeight, firstSlope, shaderName && *shaderName ? shaderName : "?", firstShader);
+
+			char note [400];
+			if (checks > 0 && passed == 0)
+			{
+				const char * const blocker = failedTexture >= checks ? "the 'Only where the ground is already' texture"
+					: failedHeight >= checks ? "the height band" : failedSlope >= checks ? "the slope range" : "the limits together";
+				IGNORE_RETURN (_snprintf (note, sizeof (note), "Nothing changed: %s left out the whole stroke (%s). The ground here is %.1f m high, slope %.0f deg, texture %s (#%d).",
+					blocker, describeLimits (edit.m_limits).c_str (), firstHeight, firstSlope, shaderName && *shaderName ? shaderName : "?", firstShader));
+			}
+			else
+				IGNORE_RETURN (_snprintf (note, sizeof (note), "Limits: %d of %d checked spots in the stroke pass (%s).", passed, checks, describeLimits (edit.m_limits).c_str ()));
+			note [sizeof (note) - 1] = '\0';
+			m_message = note;
+		}
 
 		if (changesHeight (edit.m_kind))
 			resnapTrees (edit.m_extent);
@@ -2355,6 +3821,173 @@ bool TerrainEditData::sampleCursorHeight (float & height)
 	return true;
 }
 
+TerrainEditData::PointList TerrainEditData::stampCorners (const Vector2d & centre) const
+{
+	PointList corners;
+	if (!m_clipboard.m_valid)
+		return corners;
+
+	const bool  isImage = m_clipboard.m_isImage;
+	const float halfX = 0.5f * (isImage ? m_imageSize : m_clipboard.m_sizeX);
+	const float halfZ = 0.5f * (isImage ? m_imageSize * static_cast<float> (m_clipboard.m_height - 1) / static_cast<float> (std::max (1, m_clipboard.m_width - 1)) : m_clipboard.m_sizeZ);
+	const float angle = m_stampRotation * (PI / 180.0f);
+	const float cosA = cosf (angle);
+	const float sinA = sinf (angle);
+	const float cx [] = { -halfX, halfX, halfX, -halfX };
+	const float cz [] = { -halfZ, -halfZ, halfZ, halfZ };
+	for (int c = 0; c < 4; ++c)
+		corners.push_back (Vector2d (centre.x + cx [c] * cosA - cz [c] * sinA, centre.y + cx [c] * sinA + cz [c] * cosA));
+	return corners;
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditData::drawGroundLine (const PointList & points, const bool closed, const VectorArgb & colour)
+{
+	//-- lines a little above the ground, split every ~2 m so they follow it (heights from the
+	//-- terrain already on screen: cheap)
+	const int n = static_cast<int> (points.size ());
+	if (n < 2 || !m_appearance)
+		return;
+
+	float lastHeight = 0.0f;
+	bool  haveHeight = false;
+	const int segments = closed ? n : n - 1;
+	for (int s = 0; s < segments; ++s)
+	{
+		const Vector2d & a = points [static_cast<size_t> (s)];
+		const Vector2d & b = points [static_cast<size_t> ((s + 1) % n)];
+		const int pieces = std::max (1, std::min (48, static_cast<int> (ceilf (a.magnitudeBetween (b) / 2.0f))));
+		Vector previous;
+		for (int p = 0; p <= pieces; ++p)
+		{
+			const float t = static_cast<float> (p) / static_cast<float> (pieces);
+			const float x = a.x + (b.x - a.x) * t;
+			const float z = a.y + (b.y - a.y) * t;
+			float height = 0.0f;
+			if (m_appearance->getHeight (Vector (x, 0.0f, z), height))
+			{
+				lastHeight = height;
+				haveHeight = true;
+			}
+			const Vector current (x, (haveHeight ? lastHeight : 0.0f) + 0.3f, z);
+			if (p > 0)
+				Graphics::drawLine (previous, current, colour);
+			previous = current;
+		}
+	}
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditData::drawOverlay ()
+{
+	if (!m_brushMode || getStatus () != S_ok)
+		return;
+
+	PointList circle;
+	const int circlePoints = 48;
+
+	if (m_strokeActive && !m_strokePoints.empty ())
+	{
+		if (m_strokeKind == SK_ramp)
+		{
+			if (m_strokePoints.size () >= 2 && m_strokePoints.front ().magnitudeBetween (m_strokePoints.back ()) > 0.1f)
+			{
+				const Vector2d a = m_strokePoints.front ();
+				const Vector2d b = m_strokePoints.back ();
+				const float length = a.magnitudeBetween (b);
+				const Vector2d side (-(b.y - a.y) / length * m_radius, (b.x - a.x) / length * m_radius);
+				PointList corridor;
+				corridor.push_back (Vector2d (a.x + side.x, a.y + side.y));
+				corridor.push_back (Vector2d (b.x + side.x, b.y + side.y));
+				corridor.push_back (Vector2d (b.x - side.x, b.y - side.y));
+				corridor.push_back (Vector2d (a.x - side.x, a.y - side.y));
+				drawGroundLine (corridor, true, VectorArgb::solidGreen);
+				PointList middle;
+				middle.push_back (a);
+				middle.push_back (b);
+				drawGroundLine (middle, false, VectorArgb::solidYellow);
+			}
+			return;
+		}
+
+		if (m_strokeKind == SK_stamp)
+		{
+			drawGroundLine (stampCorners (m_strokePoints.back ()), true, VectorArgb::solidCyan);
+			return;
+		}
+
+		if (m_strokeShape == SH_rectangle || m_strokeShape == SH_circle)
+		{
+			if (m_strokePoints.size () >= 2)
+			{
+				const PointList outline = buildOutline (m_strokeShape, m_strokePoints);
+				drawGroundLine (outline, true, m_strokeKind == SK_copy ? VectorArgb::solidYellow : VectorArgb::solidWhite);
+			}
+			return;
+		}
+
+		if (m_strokeShape == SH_polygon)
+		{
+			drawGroundLine (m_strokePoints, true, m_strokeKind == SK_water ? VectorArgb::solidCyan : VectorArgb::solidWhite);
+			return;
+		}
+
+		//-- brush strokes: the circle follows the last point
+		for (int i = 0; i < circlePoints; ++i)
+		{
+			const float a = PI_TIMES_2 * static_cast<float> (i) / static_cast<float> (circlePoints);
+			circle.push_back (Vector2d (m_strokePoints.back ().x + cosf (a) * m_radius, m_strokePoints.back ().y + sinf (a) * m_radius));
+		}
+		drawGroundLine (circle, true, VectorArgb::solidGreen);
+		return;
+	}
+
+	if (!m_hasCursor)
+		return;
+
+	//-- not dragging: show where the next stroke would go
+	if (m_tool == T_stamp)
+	{
+		if (m_clipboard.m_valid)
+			drawGroundLine (stampCorners (m_cursor), true, VectorArgb::solidCyan);
+		return;
+	}
+
+	const bool brushShaped = m_tool == T_road || m_tool == T_river || m_tool == T_ramp || (m_shape == SH_brush && m_tool != T_copy && m_tool != T_water);
+	if (brushShaped)
+	{
+		for (int i = 0; i < circlePoints; ++i)
+		{
+			const float a = PI_TIMES_2 * static_cast<float> (i) / static_cast<float> (circlePoints);
+			circle.push_back (Vector2d (m_cursor.x + cosf (a) * m_radius, m_cursor.y + sinf (a) * m_radius));
+		}
+		drawGroundLine (circle, true, VectorArgb::solidGreen);
+	}
+	else
+	{
+		//-- shape tools: a small cross where the drag would start
+		PointList line;
+		line.push_back (Vector2d (m_cursor.x - 2.0f, m_cursor.y));
+		line.push_back (Vector2d (m_cursor.x + 2.0f, m_cursor.y));
+		drawGroundLine (line, false, m_tool == T_copy ? VectorArgb::solidYellow : VectorArgb::solidWhite);
+		line [0] = Vector2d (m_cursor.x, m_cursor.y - 2.0f);
+		line [1] = Vector2d (m_cursor.x, m_cursor.y + 2.0f);
+		drawGroundLine (line, false, m_tool == T_copy ? VectorArgb::solidYellow : VectorArgb::solidWhite);
+	}
+}
+
+// ----------------------------------------------------------------------
+
+bool TerrainEditData::sampleCursorGround (float & height, float & slopeDegrees, int & shaderFamily)
+{
+	if (!m_hasCursor || getStatus () == S_noTerrain)
+		return false;
+
+	return sampleGround (m_cursor, height, slopeDegrees, shaderFamily);
+}
+
 // ======================================================================
 // diagnostics
 // ======================================================================
@@ -2394,6 +4027,10 @@ namespace TerrainEditDataNamespace
 		case TerrainEditData::SK_water:   return "water";
 		case TerrainEditData::SK_smooth:  return "smooth";
 		case TerrainEditData::SK_tree:    return "tree";
+		case TerrainEditData::SK_ramp:    return "ramp";
+		case TerrainEditData::SK_copy:    return "copy";
+		case TerrainEditData::SK_stamp:   return "stamp";
+		case TerrainEditData::SK_scatter: return "scatter";
 		case TerrainEditData::SK_height:
 		default:                          return "height";
 		}
@@ -2472,6 +4109,9 @@ void TerrainEditData::logStroke (const Edit & edit) const
 		kindName (edit.m_kind),
 		operationName (edit.m_operation), edit.m_height, edit.m_familyId, edit.m_radius, edit.m_feather,
 		static_cast<int> (edit.m_points.size ()), length, maxStep);
+
+	if (edit.m_limits.any ())
+		fprintf (file, "  limits: %s\n", describeLimits (edit.m_limits).c_str ());
 
 	for (size_t j = 0; j < edit.m_points.size (); ++j)
 		fprintf (file, "  p%03d %.2f %.2f\n", static_cast<int> (j), edit.m_points [j].x, edit.m_points [j].y);
@@ -2704,7 +4344,7 @@ void TerrainEditData::diagnoseLastEdit (char * const summary, const int summaryS
 	}
 
 	const Edit & edit = m_edits.back ();
-	if ((edit.m_shape != SH_brush || edit.m_kind == SK_water) && edit.m_kind != SK_tree && edit.m_kind != SK_smooth)
+	if ((edit.m_shape != SH_brush || edit.m_kind == SK_water) && edit.m_kind != SK_tree && edit.m_kind != SK_smooth && edit.m_kind != SK_ramp && edit.m_kind != SK_stamp && edit.m_kind != SK_scatter)
 	{
 		//-- shapes: the outline, the ground in the middle, and (water) whether the swim list knows it
 		const Rectangle2d extent = pointExtent (edit.m_points, 0, 0.0f);
@@ -2717,6 +4357,25 @@ void TerrainEditData::diagnoseLastEdit (char * const summary, const int summaryS
 			edit.m_kind == SK_water ? "Water" : "Fill", static_cast<int> (edit.m_points.size ()), extent.x1 - extent.x0, extent.y1 - extent.y0,
 			ground, hasWater ? "at" : "none", hasWater ? waterHeight : 0.0f,
 			edit.m_kind == SK_water && hasWater && waterHeight <= ground ? " The water is below the ground here: pick a higher Water height." : ""));
+		summary [summarySize - 1] = '\0';
+		logEvent ("CHECK %s", summary);
+		return;
+	}
+
+	if (edit.m_kind == SK_scatter)
+	{
+		int live = 0;
+		int seen = 0;
+		const std::map<int, ScatterList>::const_iterator found = m_scatter.find (edit.m_strokeId);
+		if (found != m_scatter.end ())
+			for (ScatterList::const_iterator i = found->second.begin (); i != found->second.end (); ++i)
+				if (i->m_live)
+				{
+					++live;
+					if (!i->m_id.empty ())
+						++seen;
+				}
+		IGNORE_RETURN (_snprintf (summary, static_cast<size_t> (summarySize), "Object scatter: %d objects sent to the server, %d seen back (Undo can only remove the ones seen; the rest are removed when they arrive).", live, seen));
 		summary [summarySize - 1] = '\0';
 		logEvent ("CHECK %s", summary);
 		return;
@@ -2737,9 +4396,9 @@ void TerrainEditData::diagnoseLastEdit (char * const summary, const int summaryS
 		return;
 	}
 
-	if (edit.m_kind == SK_smooth)
+	if (edit.m_kind == SK_smooth || edit.m_kind == SK_ramp || edit.m_kind == SK_stamp)
 	{
-		IGNORE_RETURN (_snprintf (summary, static_cast<size_t> (summarySize), "Smooth stroke: %d ground points baked (patches %.1f m wide).", static_cast<int> (edit.m_samples.points.size ()), edit.m_param2 * 2.0f));
+		IGNORE_RETURN (_snprintf (summary, static_cast<size_t> (summarySize), "%s stroke: %d ground points baked (patches %.1f m wide).", edit.m_kind == SK_ramp ? "Ramp" : edit.m_kind == SK_stamp ? "Stamp" : "Smooth", static_cast<int> (edit.m_samples.points.size ()), edit.m_param2 * 2.0f));
 		summary [summarySize - 1] = '\0';
 		return;
 	}
@@ -2989,10 +4648,10 @@ bool TerrainEditData::writeTerrain (const char * const diskPath, char * const me
 	LayerList clones;
 	for (EditList::const_iterator i = m_edits.begin (); i != m_edits.end (); ++i)
 	{
-		if (i->m_kind == SK_tree)
+		if (i->m_kind == SK_tree || i->m_kind == SK_scatter)
 			continue;   // trees are in the baked tree map, written below as the template holds it now
 
-		TerrainGenerator::Layer * const clone = createLayer (i->m_layer->getName (), i->m_points, i->m_kind, i->m_operation, i->m_height, i->m_familyId, i->m_radius, i->m_feather, i->m_param, i->m_param2, i->m_subKind, i->m_samples, i->m_waterShader.c_str (), i->m_shape);
+		TerrainGenerator::Layer * const clone = createLayer (i->m_layer->getName (), i->m_points, i->m_kind, i->m_operation, i->m_height, i->m_familyId, i->m_radius, i->m_feather, i->m_param, i->m_param2, i->m_subKind, i->m_samples, i->m_waterShader.c_str (), i->m_shape, i->m_limits);
 		m_originalGenerator->addLayer (clone);
 		clones.push_back (clone);
 	}
@@ -3160,6 +4819,8 @@ bool TerrainEditData::undo ()
 		resnapTrees (edit.m_extent);
 	if (edit.m_kind == SK_flora)
 		removeFloraClearing (edit.m_strokeId, static_cast<int> (edit.m_floraPoints.size ()));
+	if (edit.m_kind == SK_scatter)
+		removeScatterObjects (edit.m_strokeId);
 	if (edit.m_kind == SK_river || edit.m_kind == SK_water)
 	{
 		m_appearance->removeRunTimeWater (edit.m_strokeId);
@@ -3190,6 +4851,8 @@ bool TerrainEditData::redo ()
 		resnapTrees (edit.m_extent);
 	if (edit.m_kind == SK_flora)
 		addFloraClearing (edit.m_strokeId, edit.m_floraPoints, 0, edit.m_floraRadius);
+	if (edit.m_kind == SK_scatter)
+		createScatterObjects (edit.m_strokeId);
 	if (edit.m_kind == SK_river || edit.m_kind == SK_water)
 	{
 		m_appearance->addRunTimeWater (edit.m_layer, edit.m_strokeId);
@@ -3227,6 +4890,8 @@ void TerrainEditData::removeAll ()
 		retire (i->m_layer);
 		if (i->m_kind == SK_flora)
 			removeFloraClearing (i->m_strokeId, static_cast<int> (i->m_floraPoints.size ()));
+		if (i->m_kind == SK_scatter)
+			removeScatterObjects (i->m_strokeId);
 		if (i->m_kind == SK_river || i->m_kind == SK_water)
 			m_appearance->removeRunTimeWater (i->m_strokeId);
 	}
@@ -3268,6 +4933,9 @@ void TerrainEditData::tick ()
 
 	//-- request the waiting on-screen rebuild as soon as terrain generation is idle
 	flushDirty ();
+
+	//-- object scatter: learn the ids of objects the server has sent back
+	updateScatter ();
 
 	//-- keep the live preview moving even if the mouse pauses
 	if (m_strokeActive)

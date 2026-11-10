@@ -216,6 +216,21 @@ MainFrame::MainFrame(QWidget *theParent, const char *theName)
 		m_terrainEditDock->setCloseMode(QDockWindow::Always);
 		m_terrainEditDock->show();   // open by default so the tool is easy to find
 
+		//-- the game view is a fixed size (the client's screenWidth x screenHeight) in the middle,
+		//-- so the dock columns on each side must leave room for it. Start them narrow; drag their
+		//-- edges to resize.
+		{
+			const int leftWidth  = 200;
+			const int rightWidth = 450;
+			QDockWindow * const leftDocks [] = { m_treeBrowserDock, m_objectEditorDock, m_bookmarkBrowserDock, m_favoritesWindowDock, m_groupObjectWindowDock };
+			for (size_t d = 0; d < sizeof (leftDocks) / sizeof (leftDocks [0]); ++d)
+				if (leftDocks [d])
+					leftDocks [d]->setFixedExtentWidth (leftWidth);
+			m_terrainEditDock->setFixedExtentWidth (rightWidth);
+			if (m_filterWindowDock)
+				m_filterWindowDock->setFixedExtentWidth (rightWidth);
+		}
+
 		m_terrainEditAction = new QAction(this, "terrain_editor");
 		m_terrainEditAction->setText("Terrain Editor");
 		m_terrainEditAction->setMenuText("Te&rrain Editor (sculpt brushes)");

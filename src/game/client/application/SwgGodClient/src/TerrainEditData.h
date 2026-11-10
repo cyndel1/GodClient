@@ -28,6 +28,7 @@
 #include "sharedMath/Vector.h"
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,7 @@ class AppearanceTemplate;
 class ClientProceduralTerrainAppearance;
 class Object;
 class PackedIntegerMap;
+class VectorArgb;
 
 // ======================================================================
 
@@ -56,7 +58,11 @@ public:
 		T_road,         // draw a path: follows the ground, smoothed, with a road texture
 		T_river,        // draw a path: carves a channel and fills it with water
 		T_water,        // flat water (lake / pond) at the Flatten/Level height, inside a shape
-		T_smooth        // soften bumps: the ground is sampled, blurred and baked when the drag ends
+		T_smooth,       // soften bumps: the ground is sampled, blurred and baked when the drag ends
+		T_ramp,         // drag from one end to the other: a straight slope between the ground heights there
+		T_copy,         // drag a rectangle: copies the shape of the ground there to the stamp clipboard (no edit)
+		T_stamp,        // click: stamps the clipboard (copied ground or a heightmap image) centred there
+		T_scatter       // paint server objects (the template selected in the Tree Browser) along the drag or in a shape
 	};
 
 	enum StrokeKind
@@ -71,7 +77,11 @@ public:
 		SK_river,
 		SK_water,
 		SK_smooth,      // m_samples.points = (x, target height, z) per terrain pole; m_param2 = half patch size
-		SK_tree         // trees in the baked flora map: m_treeTiles; the layer is an empty marker
+		SK_tree,        // trees in the baked flora map: m_treeTiles; the layer is an empty marker
+		SK_ramp,        // baked like SK_smooth: m_samples.points = (x, ramp height, z) per pole; m_param2 = half patch
+		SK_copy,        // copy to the clipboard: never becomes an edit
+		SK_stamp,       // baked like SK_smooth: the clipboard stamped at m_points [0]
+		SK_scatter      // server objects (m_scatter [strokeId]); the layer is an empty marker, never saved
 	};
 
 	//-- how a drag is turned into an area. Brush = along the drag; the others fill a shape
@@ -97,6 +107,23 @@ public:
 		PK_static,      // FloraGroup family: bushes, rocks (static non-collidable flora)
 		PK_radial,      // RadialGroup family: grass and small plants (dynamic near flora)
 		PK_tree         // FloraGroup family placed in the .trn's baked tree map (one per 16 m tile)
+	};
+
+	//-- Smart paint: optional limits for Paint, Plant flora (trees too) and Clear flora. The stroke
+	//-- only acts where the ground passes every limit that is on. Paint / plant / clear use the
+	//-- engine's own layer filters (saved in the .trn); trees are checked once, when planted.
+	struct Limits
+	{
+		bool  m_slopeOn;
+		float m_slopeMin;       // degrees from flat, 0..90
+		float m_slopeMax;
+		bool  m_heightOn;
+		float m_heightLow;      // metres
+		float m_heightHigh;
+		int   m_onTexture;      // shader family id; 0 = any texture
+
+		Limits () : m_slopeOn (false), m_slopeMin (30.0f), m_slopeMax (90.0f), m_heightOn (false), m_heightLow (0.0f), m_heightHigh (100.0f), m_onTexture (0) {}
+		bool any () const { return m_slopeOn || m_heightOn || m_onTexture > 0; }
 	};
 
 	enum Status
@@ -166,6 +193,16 @@ public:
 	void        setShape (Shape shape);
 	Shape       getShape () const;
 
+	//-- Flora scatter, whole planet: 0 = the planet's plants stay near the middle of their grid
+	//-- cells (a grid look), 100 = anywhere in the cell. Bushes/rocks and grass. Saved in the .trn.
+	int         getFloraScatter ();            // -1 = not on a ground planet
+	void        setFloraScatter (int percent);
+
+	//-- Smart paint limits (used by Paint, Plant flora and Clear flora)
+	void          setLimits (const Limits & limits);
+	const Limits &getLimits () const;
+	static bool   toolUsesLimits (Tool tool);
+
 	void        setBrushMode (bool on);
 	bool        isBrushMode () const;
 
@@ -177,6 +214,41 @@ public:
 
 	void        setCursor (const Vector2d & position_w);
 	bool        sampleCursorHeight (float & height);   // expensive: call a few times a second at most
+	bool        sampleCursorGround (float & height, float & slopeDegrees, int & shaderFamily);   // as the Limits see it
+
+	//-- draws the brush circle, the shape being dragged and the stamp footprint as lines on the
+	//-- ground. Called every frame from the God Client's 3D drawing (vertex-colour shader, identity transform set).
+	void        drawOverlay ();
+
+	//-- Flatten under selection: levels the ground under each selected object to its base height,
+	//-- over its footprint plus a 1 m margin, with a soft rim as wide as the brush size. One edit per
+	//-- object. Returns the number of edits made; the message line says what happened.
+	int         flattenUnderSelection ();
+
+	//-- Object scatter: server objects of the template selected in the Tree Browser (ServerTemplates),
+	//-- placed at Object spacing x Plant density, snapped to the ground, at most 250 per stroke
+	void        setScatterSpacing (float metres);
+	float       getScatterSpacing () const;
+	void        setScatterRandomTurn (bool on);
+	bool        getScatterRandomTurn () const;
+	static std::string getScatterTemplate ();   // "" = none selected
+
+	//-- Stamp clipboard: the shape of copied ground (heights relative to the copied area's edge), or a
+	//-- greyscale heightmap image (values 0..1, scaled by the image height). Stamps sit on the ground:
+	//-- the stamp's edge meets the average ground along the stamp's outline.
+	bool        hasClipboard () const;
+	std::string describeClipboard () const;
+	void        setClipboardFromImage (const char * name, int width, int height, const std::vector<float> & values01);
+	void        setStampRotation (float degrees);
+	float       getStampRotation () const;
+	void        setStampMirror (bool mirror);
+	bool        getStampMirror () const;
+	void        setStampHeightScale (float scale);   // 1 = as copied / as the image; negative = upside down
+	float       getStampHeightScale () const;
+	void        setImageSize (float metres);         // heightmap images: width of the stamp
+	float       getImageSize () const;
+	void        setImageHeight (float metres);       // heightmap images: height of white
+	float       getImageHeight () const;
 
 	//-- history
 	bool        undo ();
@@ -236,6 +308,7 @@ private:
 		std::vector<int>          m_treeTiles;       // tree strokes: baked-map tile index (z * width + x), all empty before
 		std::vector<float>        m_treeHeights;     // tree strokes: baked tree height per tile
 		std::vector<float>        m_treeOldHeights;  // tree strokes: the tile's baked height before
+		Limits                    m_limits;          // Smart paint limits (paint, plant, flora, tree)
 	};
 
 	typedef std::vector<Edit>                      EditList;
@@ -243,12 +316,29 @@ private:
 
 	void        logStroke (const Edit & edit) const;
 
-	static TerrainGenerator::Layer * createLayer (const char * name, const PointList & points, StrokeKind kind, TerrainGeneratorOperation operation, float height, int familyId, float radius, float feather, float param, float param2, int subKind, const PathSamples & samples, const char * waterShader, Shape shape);
+	static TerrainGenerator::Layer * createLayer (const char * name, const PointList & points, StrokeKind kind, TerrainGeneratorOperation operation, float height, int familyId, float radius, float feather, float param, float param2, int subKind, const PathSamples & samples, const char * waterShader, Shape shape, const Limits & limits);
+	static TerrainGenerator::Layer * addLimitLayers (TerrainGenerator::Layer * layer, const Limits & limits);
+	static bool                      kindUsesLimits (StrokeKind kind);
+	bool                             sampleGround (const Vector2d & position_w, float & height, float & slopeDegrees, int & shaderFamily);
+	bool                             passesLimits (const Vector2d & position_w, const Limits & limits);
+	void                             bakeLimitedClear ();
+	static std::string               describeLimits (const Limits & limits);
 	static PointList                 buildOutline (Shape shape, const PointList & dragPoints);
 	static PointList                 coverPoints (const PointList & outline, float & radius);
 	static bool                      isInsidePolygon (const Vector2d & point, const PointList & outline);
 	void                             refreshSwimWater ();
 	bool                             bakeSmooth ();
+	bool                             bakeRamp ();
+	void                             copyGround ();
+	bool                             bakeScatter ();
+	void                             createScatterObjects (int strokeId);
+	void                             removeScatterObjects (int strokeId);
+	void                             updateScatter ();
+	bool                             bakeStamp ();
+	float                            sampleClipboard (float u, float v) const;   // u, v in grid cells; bilinear
+	void                             drawGroundLine (const PointList & points, bool closed, const VectorArgb & colour);
+	PointList                        stampCorners (const Vector2d & centre) const;
+	bool                             sampleGroundGrid (const Rectangle2d & area, int margin, float & spacing, int & gx0, int & gz0, int & nx, int & nz, std::vector<float> & ground);
 	bool                             loadTreeMaps ();
 	void                             resnapTrees (const Rectangle2d & area);   // baked tree heights := current ground
 	static bool                      changesHeight (StrokeKind kind);
@@ -313,6 +403,50 @@ private:
 	float       m_smoothStrength;
 	std::string m_waterShader;      // water shader used by River strokes (found on the planet)
 	Shape       m_shape;
+	Limits      m_limits;
+
+	//-- stamp clipboard
+	struct Clipboard
+	{
+		bool               m_valid;
+		bool               m_isImage;
+		std::string        m_name;
+		int                m_width;      // grid points
+		int                m_height;
+		float              m_sizeX;      // metres (copied ground; images use m_imageSize)
+		float              m_sizeZ;
+		std::vector<float> m_values;     // copied: metres above the copied edge; image: 0..1
+		Clipboard () : m_valid (false), m_isImage (false), m_name (), m_width (0), m_height (0), m_sizeX (0.0f), m_sizeZ (0.0f), m_values () {}
+	};
+	Clipboard   m_clipboard;
+
+	//-- object scatter. The server creates objects from a console command and sends them back
+	//-- later without saying which command made them, so each placement is matched to the object
+	//-- that appears at its spot (same template, within 0.4 m) to learn its id for Undo.
+	struct ScatterItem
+	{
+		std::string   m_serverTemplate;
+		std::string   m_sharedTemplate;
+		Vector        m_position;
+		float         m_yaw;
+		std::string   m_id;              // network id once seen ("" = not seen yet)
+		bool          m_live;            // created and not undone
+		bool          m_deleteWhenSeen;  // undone before the server sent it back
+		unsigned long m_createdAt;
+		ScatterItem () : m_serverTemplate (), m_sharedTemplate (), m_position (), m_yaw (0.0f), m_id (), m_live (false), m_deleteWhenSeen (false), m_createdAt (0) {}
+	};
+	typedef std::vector<ScatterItem>          ScatterList;
+	std::map<int, ScatterList>                m_scatter;          // by stroke id
+	ScatterList                               m_strokeScatter;
+	std::set<int>                             m_scatterWarned;    // strokes already reported as "nothing came back"
+	float       m_scatterSpacing;
+	bool        m_scatterRandomTurn;
+	unsigned long m_lastScatterScan;
+	float       m_stampRotation;
+	bool        m_stampMirror;
+	float       m_stampHeightScale;
+	float       m_imageSize;
+	float       m_imageHeight;
 	std::string m_message;          // for the panel (takeMessage)
 	bool        m_brushMode;
 
@@ -332,6 +466,9 @@ private:
 	PathSamples               m_strokeSamples;
 	int                       m_strokeFloraPointsCleared;   // flora strokes: points already given clear circles
 	Shape                     m_strokeShape;
+	bool                      m_strokeOutlineReady;   // shape strokes made in code: m_strokePoints is already the outline
+	std::string               m_strokeNameOverride;   // edit-list name for strokes made in code
+	Limits                    m_strokeLimits;
 	std::vector<int>          m_strokeTreeTiles;
 	std::vector<float>        m_strokeTreeHeights;
 	std::vector<float>        m_strokeTreeOldHeights;

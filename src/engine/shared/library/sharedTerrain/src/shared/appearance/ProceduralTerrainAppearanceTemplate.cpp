@@ -506,6 +506,18 @@ void ProceduralTerrainAppearanceTemplate::setStaticCollidableFloraMaps (const in
 
 //-------------------------------------------------------------------
 
+void ProceduralTerrainAppearanceTemplate::setFloraTileBorders (const float nonCollidableBorder, const float radialBorder, const float farRadialBorder)
+{
+	if (nonCollidableBorder >= 0.f)
+		m_nonCollidableTileBorder = nonCollidableBorder;
+	if (radialBorder >= 0.f)
+		m_radialTileBorder = radialBorder;
+	if (farRadialBorder >= 0.f)
+		m_farRadialTileBorder = farRadialBorder;
+}
+
+//-------------------------------------------------------------------
+
 void ProceduralTerrainAppearanceTemplate::rebuildWaterTables ()
 {
 	if (m_terrainGenerator && m_waterTableList && m_ribbonQuadList && m_ribbonEndCapList)

@@ -48,6 +48,9 @@ public:
 
 	void setDebugName (const std::string& debugName);
 	void initialize (float floraTileSize, float floraTileBorderIgnoreDistance, uint32 seed);
+	void setTileBorder (float floraTileBorderIgnoreDistance);   // re-places every node (God Client terrain editor: flora scatter)
+	float getTileSize () const { return m_floraTileSize; }
+	float getTileBorder () const { return m_floraTileBorderIgnoreDistance; }
 
 	void markExtentDirty (const BoxExtent* boxExtent);
 	void markRegionDirty (const Rectangle2d& rectangle);

@@ -48,6 +48,7 @@
 #include "ActionsBuildoutArea.h"
 #include "BrushData.h"
 #include "BuildoutAreaSupport.h"
+#include "TerrainEditData.h"
 #include "ConfigGodClient.h"
 #include "GodClientIoWin.h"
 #include "MainFrame.h"
@@ -807,6 +808,11 @@ void GodClientData::draw(const Camera& camera)
 			}
 		}
 	}
+
+	//-- terrain editor: brush circle, the shape being dragged, the stamp footprint
+	Graphics::setStaticShader(ShaderTemplateList::get3dVertexColorZStaticShader());
+	Graphics::setObjectToWorldTransformAndScale(Transform::identity, Vector::xyz111);
+	TerrainEditData::getInstance().drawOverlay();
 }
 
 //-----------------------------------------------------------------

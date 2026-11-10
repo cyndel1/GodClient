@@ -274,6 +274,18 @@ Object* ServerCommander::createObject(const std::string& theName, const std::str
 
 //-----------------------------------------------------------------
 
+unsigned int ServerCommander::destroyObjectById(const std::string& networkIdString)
+{
+	if (networkIdString.empty())
+		return 0;
+	char buf[256];
+	IGNORE_RETURN(_snprintf(buf, sizeof(buf), "object destroy %s", networkIdString.c_str()));
+	buf[sizeof(buf) - 1] = '\0';
+	return issueCommand(buf);
+}
+
+//-----------------------------------------------------------------
+
 /**
  * Build a command to ask the server to delete the given object
  *

@@ -14,6 +14,8 @@
 #include <qapplication.h>
 #include <qcheckbox.h>
 #include <qcombobox.h>
+#include <qgroupbox.h>
+#include <qimage.h>
 #include <qfiledialog.h>
 #include <qmessagebox.h>
 #include <qlabel.h>
@@ -28,6 +30,9 @@
 #include <qbuttongroup.h>
 #include <qscrollview.h>
 #include <qvbuttongroup.h>
+
+#include <algorithm>
+#include <cstdio>
 
 // ======================================================================
 
@@ -62,6 +67,29 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	m_plantIds (),
 	m_plantDensity (0),
 	m_riverDepth (0),
+	m_shape (0),
+	m_smoothStrength (0),
+	m_floraScatter (0),
+	m_flattenSelection (0),
+	m_clipboardLabel (0),
+	m_loadImage (0),
+	m_stampRotation (0),
+	m_stampMirror (0),
+	m_stampScale (0),
+	m_imageSize (0),
+	m_imageHeight (0),
+	m_scatterTemplate (0),
+	m_scatterSpacing (0),
+	m_scatterTurn (0),
+	m_slopeOn (0),
+	m_slopeMin (0),
+	m_slopeMax (0),
+	m_heightOn (0),
+	m_heightLow (0),
+	m_heightHigh (0),
+	m_onTexture (0),
+	m_onTextureIds (),
+	m_limitsNote (0),
 	m_status (0),
 	m_editList (0),
 	m_undo (0),
@@ -91,9 +119,13 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	QWidget * const content = new QWidget (scroll->viewport (), "terrainEditContent");
 	scroll->addChild (content);
 
-	QVBoxLayout * const layout = new QVBoxLayout (content, 6, 4, "terrainEditLayout");
+	//-- a gap on the right keeps the spin-box arrows clear of the panel's scroll bar
+	QHBoxLayout * const sides = new QHBoxLayout (content, 6, 0, "terrainEditSides");
+	QVBoxLayout * const layout = new QVBoxLayout (4, "terrainEditLayout");
+	sides->addLayout (layout, 1);
+	sides->addSpacing (2);
 
-	m_brushMode = new QCheckBox ("Terrain brush on (left drag = paint, right = alternate)", content, "brushMode");
+	m_brushMode = new QCheckBox ("Terrain brush on (left drag = paint,\nright = alternate)", content, "brushMode");
 	layout->addWidget (m_brushMode);
 
 	//-- two columns of tools (button ids follow TerrainEditData::Tool)
@@ -112,7 +144,14 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	IGNORE_RETURN (new QRadioButton ("River (draw a path)",   m_tools, "river"));
 	IGNORE_RETURN (new QRadioButton ("Water level (lake)",    m_tools, "water"));
 	IGNORE_RETURN (new QRadioButton ("Smooth",                m_tools, "smooth"));
+	IGNORE_RETURN (new QRadioButton ("Ramp (drag end to end)", m_tools, "ramp"));
+	IGNORE_RETURN (new QRadioButton ("Copy ground (rectangle)", m_tools, "copy"));
+	IGNORE_RETURN (new QRadioButton ("Stamp (click to place)", m_tools, "stamp"));
+	IGNORE_RETURN (new QRadioButton ("Object scatter", m_tools, "scatter"));
 	layout->addWidget (m_tools);
+
+	m_flattenSelection = new QPushButton ("Flatten under selected objects", content, "flattenSelection");
+	layout->addWidget (m_flattenSelection);
 
 	//-- shape fills (ids follow TerrainEditData::Shape)
 	QHBoxLayout * const shapeRow = new QHBoxLayout (4, "terrainEditShape");
@@ -126,11 +165,12 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	shapeRow->addWidget (m_shape, 1);
 
 	QLabel * const toolHint = new QLabel ("Flatten: the first click sets the height, kept for later strokes (click Flatten again to pick a new one). Flatten/Level/Water: right-click picks the ground height. Paint, Roughen and Plant use the choices below. Road and River: drag along the path; they appear when you let go, use the Paint texture, and are as wide as the brush (size x 2). Textures with a higher priority are drawn over lower ones where they meet, so narrow strokes look cleanest with a high-priority texture (lower in the list). "
-		"Shapes: every tool except Road and River can fill a rectangle, circle or polygon instead; the fill appears when you let go, and Soft edge % is how far in from the outline towards the middle it fades in (0% = hard edge). Water level: a flat water surface at the Flatten/Level/Water height inside the shape (Brush shape = polygon); the ground inside is dug down River/Lake depth below the water, with banks as wide as the soft edge. Right-click the ground, then add a metre or two so the water shows above it. Plant flora with a tree: entry plants trees (one per 16 m tile, into empty tiles only), shown when you let go. Smooth: softens bumps along the drag or inside the shape (built when you let go); strokes add up, so go over an area again to smooth it more.", content, "toolHint");
+		"Shapes: every tool except Road and River can fill a rectangle, circle or polygon instead; the fill appears when you let go, and Soft edge % is how far in from the outline towards the middle it fades in (0% = hard edge). Water level: a flat water surface at the Flatten/Level/Water height inside the shape (Brush shape = polygon); the ground inside is dug down River/Lake depth below the water, with banks as wide as the soft edge. The water is always kept just below the lowest point of the shore (height 0 = fill to just below the shore). Plant flora with a tree: entry plants trees (one per 16 m tile, into empty tiles only), shown when you let go. Smooth: softens bumps along the drag or inside the shape (built when you let go); strokes add up, so go over an area again to smooth it more. "
+		"Ramp: drag from one end to the other; when you let go, the ground between becomes a straight slope from the ground height at the start to the ground height at the end, as wide as the brush (size x 2), fading out over the soft edge. Flatten under selected objects: select buildings or objects (untick Terrain brush on to select), then press the button; the ground under each is levelled to its base height, 1 m past its footprint, with a slope back to the old ground as wide as Brush size.", content, "toolHint");
 	toolHint->setAlignment (Qt::WordBreak | Qt::AlignLeft);
 	layout->addWidget (toolHint);
 
-	QGridLayout * const grid = new QGridLayout (13, 2, 4, "terrainEditGrid");
+	QGridLayout * const grid = new QGridLayout (14, 2, 4, "terrainEditGrid");
 	layout->addLayout (grid);
 
 	grid->addWidget (new QLabel ("Brush size (m)", content), 0, 0);
@@ -190,6 +230,121 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	m_smoothStrength = new QSpinBox (5, 100, 5, content, "smoothStrength");
 	grid->addWidget (m_smoothStrength, 12, 1);
 
+	grid->addWidget (new QLabel ("Flora scatter, whole planet (%)", content), 13, 0);
+	m_floraScatter = new QSpinBox (0, 100, 10, content, "floraScatter");
+	grid->addWidget (m_floraScatter, 13, 1);
+
+	//-- Object scatter
+	{
+		QGroupBox * const scatter = new QGroupBox ("Object scatter (server objects)", content, "scatter");
+		scatter->setColumnLayout (0, Qt::Vertical);
+		scatter->layout ()->setSpacing (4);
+		scatter->layout ()->setMargin (6);
+		QGridLayout * const scatterGrid = new QGridLayout (scatter->layout ());
+		scatterGrid->setAlignment (Qt::AlignTop);
+
+		m_scatterTemplate = new QLabel ("", scatter, "scatterTemplate");
+		m_scatterTemplate->setAlignment (Qt::WordBreak | Qt::AlignLeft);
+		scatterGrid->addMultiCellWidget (m_scatterTemplate, 0, 0, 0, 1);
+
+		scatterGrid->addWidget (new QLabel ("Object spacing (m)", scatter), 1, 0);
+		m_scatterSpacing = new QSpinBox (1, 200, 1, scatter, "scatterSpacing");
+		scatterGrid->addWidget (m_scatterSpacing, 1, 1);
+
+		m_scatterTurn = new QCheckBox ("Random turn", scatter, "scatterTurn");
+		scatterGrid->addMultiCellWidget (m_scatterTurn, 2, 2, 0, 1);
+
+		QLabel * const scatterNote = new QLabel ("Paint with the brush or fill a shape: one object per spacing cell, at a random spot in it, kept at Plant density and where the Limits pass, at most 250 per stroke. They are real server objects: everyone sees them, they are not saved in the .trn, and Undo destroys them.", scatter, "scatterNote");
+		scatterNote->setAlignment (Qt::WordBreak | Qt::AlignLeft);
+		scatterGrid->addMultiCellWidget (scatterNote, 3, 3, 0, 1);
+
+		layout->addWidget (scatter);
+	}
+
+	//-- Copy ground / Stamp / heightmap images
+	{
+		QGroupBox * const stamp = new QGroupBox ("Stamp (copied ground or heightmap image)", content, "stamp");
+		stamp->setColumnLayout (0, Qt::Vertical);
+		stamp->layout ()->setSpacing (4);
+		stamp->layout ()->setMargin (6);
+		QGridLayout * const stampGrid = new QGridLayout (stamp->layout ());
+		stampGrid->setAlignment (Qt::AlignTop);
+
+		m_clipboardLabel = new QLabel ("", stamp, "clipboardLabel");
+		m_clipboardLabel->setAlignment (Qt::WordBreak | Qt::AlignLeft);
+		stampGrid->addMultiCellWidget (m_clipboardLabel, 0, 0, 0, 1);
+
+		m_loadImage = new QPushButton ("Load heightmap image...", stamp, "loadImage");
+		stampGrid->addMultiCellWidget (m_loadImage, 1, 1, 0, 1);
+
+		stampGrid->addWidget (new QLabel ("Turn (deg)", stamp), 2, 0);
+		m_stampRotation = new QSpinBox (0, 359, 15, stamp, "stampRotation");
+		m_stampRotation->setWrapping (true);
+		stampGrid->addWidget (m_stampRotation, 2, 1);
+
+		m_stampMirror = new QCheckBox ("Mirror", stamp, "stampMirror");
+		stampGrid->addMultiCellWidget (m_stampMirror, 3, 3, 0, 1);
+
+		stampGrid->addWidget (new QLabel ("Height (%; minus = upside down)", stamp), 4, 0);
+		m_stampScale = new QSpinBox (-500, 500, 10, stamp, "stampScale");
+		stampGrid->addWidget (m_stampScale, 4, 1);
+
+		stampGrid->addWidget (new QLabel ("Image size (m)", stamp), 5, 0);
+		m_imageSize = new QSpinBox (4, 1024, 16, stamp, "imageSize");
+		stampGrid->addWidget (m_imageSize, 5, 1);
+
+		stampGrid->addWidget (new QLabel ("Image height of white (m)", stamp), 6, 0);
+		m_imageHeight = new QLineEdit (stamp, "imageHeight");
+		m_imageHeight->setValidator (new QDoubleValidator (-500.0, 500.0, 1, m_imageHeight));
+		stampGrid->addWidget (m_imageHeight, 6, 1);
+
+		QLabel * const stampNote = new QLabel ("Copy ground: drag a rectangle; its shape goes to the clipboard (no edit). Stamp: click where the middle should go (drag to move it); it is built when you let go, sitting on the ground around it and fading in over Soft edge. Heightmap images (PNG, BMP, TGA, JPG): black = no change, white = the image height.", stamp, "stampNote");
+		stampNote->setAlignment (Qt::WordBreak | Qt::AlignLeft);
+		stampGrid->addMultiCellWidget (stampNote, 7, 7, 0, 1);
+
+		layout->addWidget (stamp);
+	}
+
+	//-- Smart paint limits
+	{
+		QGroupBox * const limits = new QGroupBox ("Limits (Paint, Plant flora, Clear flora)", content, "limits");
+		limits->setColumnLayout (0, Qt::Vertical);
+		limits->layout ()->setSpacing (4);
+		limits->layout ()->setMargin (6);
+		QGridLayout * const limitGrid = new QGridLayout (limits->layout ());
+		limitGrid->setAlignment (Qt::AlignTop);
+
+		m_slopeOn = new QCheckBox ("Slope between (deg)", limits, "slopeOn");
+		limitGrid->addWidget (m_slopeOn, 0, 0);
+		m_slopeMin = new QSpinBox (0, 90, 5, limits, "slopeMin");
+		limitGrid->addWidget (m_slopeMin, 0, 1);
+		limitGrid->addWidget (new QLabel ("to", limits), 0, 2);
+		m_slopeMax = new QSpinBox (0, 90, 5, limits, "slopeMax");
+		limitGrid->addWidget (m_slopeMax, 0, 3);
+
+		m_heightOn = new QCheckBox ("Height between (m)", limits, "heightOn");
+		limitGrid->addWidget (m_heightOn, 1, 0);
+		m_heightLow = new QLineEdit (limits, "heightLow");
+		m_heightLow->setValidator (new QDoubleValidator (-10000.0, 10000.0, 1, m_heightLow));
+		limitGrid->addWidget (m_heightLow, 1, 1);
+		limitGrid->addWidget (new QLabel ("to", limits), 1, 2);
+		m_heightHigh = new QLineEdit (limits, "heightHigh");
+		m_heightHigh->setValidator (new QDoubleValidator (-10000.0, 10000.0, 1, m_heightHigh));
+		limitGrid->addWidget (m_heightHigh, 1, 3);
+
+		QLabel * const onTextureLabel = new QLabel ("Only where the ground is already", limits);
+		onTextureLabel->setAlignment (Qt::WordBreak | Qt::AlignLeft | Qt::AlignVCenter);
+		limitGrid->addWidget (onTextureLabel, 2, 0);
+		m_onTexture = new QComboBox (false, limits, "onTexture");
+		limitGrid->addMultiCellWidget (m_onTexture, 2, 2, 1, 3);
+
+		m_limitsNote = new QLabel ("The stroke only acts where the ground passes every limit that is on. Slope: 0 = flat, 90 = a cliff; 30 to 90 picks steep slopes, 0 to 10 flat ground. 'Only where the ground is already' is NOT the texture to paint (that is Paint texture above): it is the existing texture to paint over or plant on. Leave it at (any texture) unless you want that. The status line shows the height, slope and texture under the cursor.", limits, "limitsNote");
+		m_limitsNote->setAlignment (Qt::WordBreak | Qt::AlignLeft);
+		limitGrid->addMultiCellWidget (m_limitsNote, 3, 3, 0, 3);
+
+		layout->addWidget (limits);
+	}
+
 	m_status = new QLabel ("", content, "status");
 	m_status->setTextFormat (Qt::PlainText);
 	layout->addWidget (m_status);
@@ -232,6 +387,18 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	note->setAlignment (Qt::WordBreak | Qt::AlignLeft);
 	layout->addWidget (note);
 
+	//-- drop-down lists hold long names (textures with "#id, priority n"); without this their width
+	//-- would push the panel wider than the dock, under the scroll bar. They shrink instead, and the
+	//-- full name shows when the list is opened.
+	{
+		QComboBox * const combos [] = { m_shape, m_paintFamily, m_fractal, m_plant, m_onTexture };
+		for (size_t i = 0; i < sizeof (combos) / sizeof (combos [0]); ++i)
+		{
+			combos [i]->setSizePolicy (QSizePolicy (QSizePolicy::Ignored, QSizePolicy::Fixed));
+			combos [i]->setMinimumWidth (80);
+		}
+	}
+
 	//-- initial values
 	m_updating = true;
 	m_radius->setValue (static_cast<int> (data.getRadius ()));
@@ -244,12 +411,31 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	m_plantDensity->setValue (static_cast<int> (data.getPlantDensity () * 100.0f + 0.5f));
 	m_riverDepth->setText (QString::number (data.getRiverDepth (), 'f', 1));
 	m_smoothStrength->setValue (static_cast<int> (data.getSmoothStrength () * 100.0f + 0.5f));
+	m_stampRotation->setValue (static_cast<int> (data.getStampRotation () + 0.5f));
+	m_stampMirror->setChecked (data.getStampMirror ());
+	m_stampScale->setValue (static_cast<int> (floorf (data.getStampHeightScale () * 100.0f + 0.5f)));
+	m_imageSize->setValue (static_cast<int> (data.getImageSize () + 0.5f));
+	m_imageHeight->setText (QString::number (data.getImageHeight (), 'f', 1));
+	m_clipboardLabel->setText (QString (data.describeClipboard ().c_str ()));
+	m_scatterSpacing->setValue (static_cast<int> (data.getScatterSpacing () + 0.5f));
+	m_scatterTurn->setChecked (data.getScatterRandomTurn ());
+	{
+		const TerrainEditData::Limits & limits = data.getLimits ();
+		m_slopeOn->setChecked (limits.m_slopeOn);
+		m_slopeMin->setValue (static_cast<int> (limits.m_slopeMin + 0.5f));
+		m_slopeMax->setValue (static_cast<int> (limits.m_slopeMax + 0.5f));
+		m_heightOn->setChecked (limits.m_heightOn);
+		m_heightLow->setText (QString::number (limits.m_heightLow, 'f', 1));
+		m_heightHigh->setText (QString::number (limits.m_heightHigh, 'f', 1));
+	}
 	m_tools->setButton (static_cast<int> (data.getTool ()));
 	m_shape->setCurrentItem (static_cast<int> (data.getShape ()));
 	m_brushMode->setChecked (data.isBrushMode ());
 	m_updating = false;
 
 	//-- connections
+	IGNORE_RETURN (connect (m_scatterSpacing, SIGNAL (valueChanged (int)),         this, SLOT (onScatterChangedInt (int))));
+	IGNORE_RETURN (connect (m_scatterTurn, SIGNAL (toggled (bool)),                this, SLOT (onScatterChangedBool (bool))));
 	IGNORE_RETURN (connect (m_brushMode,   SIGNAL (toggled (bool)),                this, SLOT (onBrushModeToggled (bool))));
 	IGNORE_RETURN (connect (m_tools,       SIGNAL (clicked (int)),                 this, SLOT (onToolClicked (int))));
 	IGNORE_RETURN (connect (m_radius,      SIGNAL (valueChanged (int)),            this, SLOT (onRadiusChanged (int))));
@@ -266,6 +452,21 @@ TerrainEditWindow::TerrainEditWindow (QWidget * const parent, const char * const
 	IGNORE_RETURN (connect (m_riverDepth,  SIGNAL (textChanged (const QString &)), this, SLOT (onRiverDepthChanged (const QString &))));
 	IGNORE_RETURN (connect (m_shape,       SIGNAL (activated (int)),               this, SLOT (onShapeActivated (int))));
 	IGNORE_RETURN (connect (m_smoothStrength, SIGNAL (valueChanged (int)),         this, SLOT (onSmoothStrengthChanged (int))));
+	IGNORE_RETURN (connect (m_floraScatter, SIGNAL (valueChanged (int)),           this, SLOT (onFloraScatterChanged (int))));
+	IGNORE_RETURN (connect (m_flattenSelection, SIGNAL (clicked ()),               this, SLOT (onFlattenSelection ())));
+	IGNORE_RETURN (connect (m_loadImage,   SIGNAL (clicked ()),                    this, SLOT (onLoadImage ())));
+	IGNORE_RETURN (connect (m_stampRotation, SIGNAL (valueChanged (int)),          this, SLOT (onStampChangedInt (int))));
+	IGNORE_RETURN (connect (m_stampMirror, SIGNAL (toggled (bool)),                this, SLOT (onStampChangedBool (bool))));
+	IGNORE_RETURN (connect (m_stampScale,  SIGNAL (valueChanged (int)),            this, SLOT (onStampChangedInt (int))));
+	IGNORE_RETURN (connect (m_imageSize,   SIGNAL (valueChanged (int)),            this, SLOT (onStampChangedInt (int))));
+	IGNORE_RETURN (connect (m_imageHeight, SIGNAL (textChanged (const QString &)), this, SLOT (onStampChangedText (const QString &))));
+	IGNORE_RETURN (connect (m_slopeOn,     SIGNAL (toggled (bool)),                this, SLOT (onLimitsChangedBool (bool))));
+	IGNORE_RETURN (connect (m_slopeMin,    SIGNAL (valueChanged (int)),            this, SLOT (onLimitsChangedInt (int))));
+	IGNORE_RETURN (connect (m_slopeMax,    SIGNAL (valueChanged (int)),            this, SLOT (onLimitsChangedInt (int))));
+	IGNORE_RETURN (connect (m_heightOn,    SIGNAL (toggled (bool)),                this, SLOT (onHeightLimitToggled (bool))));
+	IGNORE_RETURN (connect (m_heightLow,   SIGNAL (textChanged (const QString &)), this, SLOT (onLimitsChangedText (const QString &))));
+	IGNORE_RETURN (connect (m_heightHigh,  SIGNAL (textChanged (const QString &)), this, SLOT (onLimitsChangedText (const QString &))));
+	IGNORE_RETURN (connect (m_onTexture,   SIGNAL (activated (int)),               this, SLOT (onLimitsChangedInt (int))));
 	IGNORE_RETURN (connect (m_undo,        SIGNAL (clicked ()),                    this, SLOT (onUndo ())));
 	IGNORE_RETURN (connect (m_redo,        SIGNAL (clicked ()),                    this, SLOT (onRedo ())));
 	IGNORE_RETURN (connect (m_removeAll,   SIGNAL (clicked ()),                    this, SLOT (onRemoveAll ())));
@@ -300,7 +501,7 @@ void TerrainEditWindow::onBrushModeToggled (const bool on)
 
 void TerrainEditWindow::onToolClicked (const int id)
 {
-	if (!m_updating && id >= 0 && id <= static_cast<int> (TerrainEditData::T_smooth))
+	if (!m_updating && id >= 0 && id <= static_cast<int> (TerrainEditData::T_scatter))
 		TerrainEditData::getInstance ().setTool (static_cast<TerrainEditData::Tool> (id));
 }
 
@@ -480,6 +681,245 @@ void TerrainEditWindow::onRemoveAll ()
 
 // ----------------------------------------------------------------------
 
+void TerrainEditWindow::onLimitsChanged ()
+{
+	if (m_updating)
+		return;
+
+	TerrainEditData::Limits limits;
+	limits.m_slopeOn  = m_slopeOn->isChecked ();
+	limits.m_slopeMin = static_cast<float> (std::min (m_slopeMin->value (), m_slopeMax->value ()));
+	limits.m_slopeMax = static_cast<float> (std::max (m_slopeMin->value (), m_slopeMax->value ()));
+	limits.m_heightOn = m_heightOn->isChecked ();
+
+	bool okLow = false;
+	bool okHigh = false;
+	const float low  = m_heightLow->text ().toFloat (&okLow);
+	const float high = m_heightHigh->text ().toFloat (&okHigh);
+	const TerrainEditData::Limits & current = TerrainEditData::getInstance ().getLimits ();
+	limits.m_heightLow  = okLow ? low : current.m_heightLow;
+	limits.m_heightHigh = okHigh ? high : current.m_heightHigh;
+
+	const int textureIndex = m_onTexture->currentItem ();
+	limits.m_onTexture = (textureIndex >= 0 && textureIndex < static_cast<int> (m_onTextureIds.size ())) ? m_onTextureIds [static_cast<size_t> (textureIndex)] : 0;
+
+	TerrainEditData::getInstance ().setLimits (limits);
+}
+
+void TerrainEditWindow::onLimitsChangedInt (int)                  { onLimitsChanged (); }
+void TerrainEditWindow::onLimitsChangedText (const QString &)     { onLimitsChanged (); }
+void TerrainEditWindow::onLimitsChangedBool (bool)                { onLimitsChanged (); }
+
+namespace TerrainEditWindowNamespace
+{
+	//-- minimal TGA reader (8-bit grey, 24/32-bit colour; uncompressed or RLE) -> grey 0..1, row 0 = top
+	bool readTarga (const char * const path, int & width, int & height, std::vector<float> & grey)
+	{
+		FILE * const file = fopen (path, "rb");
+		if (!file)
+			return false;
+		std::vector<unsigned char> bytes;
+		{
+			unsigned char buffer [65536];
+			size_t n;
+			while ((n = fread (buffer, 1, sizeof (buffer), file)) > 0)
+				bytes.insert (bytes.end (), buffer, buffer + n);
+			fclose (file);
+		}
+		if (bytes.size () < 18)
+			return false;
+
+		const int idLength  = bytes [0];
+		const int mapType   = bytes [1];
+		const int imageType = bytes [2];
+		const int mapLength = bytes [5] | (bytes [6] << 8);
+		const int mapDepth  = bytes [7];
+		width  = bytes [12] | (bytes [13] << 8);
+		height = bytes [14] | (bytes [15] << 8);
+		const int bpp = bytes [16];
+		const bool topDown = (bytes [17] & 0x20) != 0;
+		if (width <= 1 || height <= 1 || (imageType != 2 && imageType != 3 && imageType != 10 && imageType != 11) || (bpp != 8 && bpp != 24 && bpp != 32))
+			return false;
+
+		size_t pos = 18 + static_cast<size_t> (idLength) + (mapType ? static_cast<size_t> (mapLength * ((mapDepth + 7) / 8)) : 0);
+		const int pixelBytes = bpp / 8;
+		const size_t count = static_cast<size_t> (width) * static_cast<size_t> (height);
+		std::vector<float> pixels (count, 0.0f);
+
+		const bool rle = imageType == 10 || imageType == 11;
+		size_t i = 0;
+		while (i < count)
+		{
+			//-- a packet: uncompressed files are one-pixel raw packets
+			int run = 1;
+			bool repeat = false;
+			if (rle)
+			{
+				if (pos >= bytes.size ())
+					return false;
+				const unsigned char header = bytes [pos++];
+				run = (header & 0x7f) + 1;
+				repeat = (header & 0x80) != 0;
+			}
+
+			for (int r = 0; r < run && i < count; ++r)
+			{
+				if (pos + static_cast<size_t> (pixelBytes) > bytes.size ())
+					return false;
+				const unsigned char * const p = &bytes [pos];
+				pixels [i++] = pixelBytes == 1 ? p [0] / 255.0f : (0.114f * p [0] + 0.587f * p [1] + 0.299f * p [2]) / 255.0f;   // BGR
+				if (!repeat)
+					pos += static_cast<size_t> (pixelBytes);
+			}
+			if (repeat)
+				pos += static_cast<size_t> (pixelBytes);
+		}
+
+		grey.resize (count);
+		for (int y = 0; y < height; ++y)
+		{
+			const int sourceRow = topDown ? y : height - 1 - y;
+			for (int x = 0; x < width; ++x)
+				grey [static_cast<size_t> (y * width + x)] = pixels [static_cast<size_t> (sourceRow * width + x)];
+		}
+		return true;
+	}
+}
+
+void TerrainEditWindow::onLoadImage ()
+{
+	static QString s_lastFile;
+	const QString path = QFileDialog::getOpenFileName (s_lastFile, "Heightmap images (*.png *.bmp *.tga *.jpg *.jpeg);;All files (*.*)", this, "loadHeightmap", "Load heightmap image");
+	if (path.isEmpty ())
+		return;
+	s_lastFile = path;
+
+	int width = 0;
+	int height = 0;
+	std::vector<float> grey;
+	bool ok = false;
+	if (path.lower ().endsWith (".tga"))
+		ok = readTarga (path.latin1 (), width, height, grey);
+	else
+	{
+		QImage image;
+		if (image.load (path))
+		{
+			width  = image.width ();
+			height = image.height ();
+			grey.resize (static_cast<size_t> (width * height));
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < width; ++x)
+					grey [static_cast<size_t> (y * width + x)] = static_cast<float> (qGray (image.pixel (x, y))) / 255.0f;
+			ok = width > 1 && height > 1;
+		}
+	}
+
+	if (!ok)
+	{
+		m_diagnostic->setText (QString ("Could not read %1 (PNG, BMP, JPG, or 8/24/32-bit TGA).").arg (path));
+		return;
+	}
+
+	//-- very large images: keep at most 1024 points a side (the stamp is sampled smoothly anyway)
+	const int step = std::max (1, std::max (width, height) / 1024 + (std::max (width, height) % 1024 ? 1 : 0));
+	if (step > 1)
+	{
+		const int w = (width + step - 1) / step;
+		const int h = (height + step - 1) / step;
+		std::vector<float> reduced (static_cast<size_t> (w * h));
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+				reduced [static_cast<size_t> (y * w + x)] = grey [static_cast<size_t> (std::min (height - 1, y * step) * width + std::min (width - 1, x * step))];
+		grey.swap (reduced);
+		width = w;
+		height = h;
+	}
+
+	QString name = path;
+	const int slash = std::max (name.findRev ('/'), name.findRev ('\\'));
+	if (slash >= 0)
+		name = name.mid (slash + 1);
+
+	TerrainEditData::getInstance ().setClipboardFromImage (name.latin1 (), width, height, grey);
+	refreshFromData ();
+}
+
+void TerrainEditWindow::onStampChanged ()
+{
+	if (m_updating)
+		return;
+	TerrainEditData & data = TerrainEditData::getInstance ();
+	data.setStampRotation (static_cast<float> (m_stampRotation->value ()));
+	data.setStampMirror (m_stampMirror->isChecked ());
+	data.setStampHeightScale (static_cast<float> (m_stampScale->value ()) / 100.0f);
+	data.setImageSize (static_cast<float> (m_imageSize->value ()));
+	bool ok = false;
+	const float imageHeight = m_imageHeight->text ().toFloat (&ok);
+	if (ok)
+		data.setImageHeight (imageHeight);
+	m_clipboardLabel->setText (QString (data.describeClipboard ().c_str ()));
+}
+
+void TerrainEditWindow::onScatterChangedInt (int)
+{
+	if (!m_updating)
+		TerrainEditData::getInstance ().setScatterSpacing (static_cast<float> (m_scatterSpacing->value ()));
+}
+
+void TerrainEditWindow::onScatterChangedBool (bool)
+{
+	if (!m_updating)
+		TerrainEditData::getInstance ().setScatterRandomTurn (m_scatterTurn->isChecked ());
+}
+
+void TerrainEditWindow::onStampChangedInt (int)                { onStampChanged (); }
+void TerrainEditWindow::onStampChangedBool (bool)              { onStampChanged (); }
+void TerrainEditWindow::onStampChangedText (const QString &)   { onStampChanged (); }
+
+// ----------------------------------------------------------------------
+
+void TerrainEditWindow::onFlattenSelection ()
+{
+	m_diagnostic->setText ("Flattening under the selected objects...");
+	QApplication::flush ();
+	IGNORE_RETURN (TerrainEditData::getInstance ().flattenUnderSelection ());
+	refreshFromData ();
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditWindow::onFloraScatterChanged (const int value)
+{
+	if (m_updating)
+		return;
+	TerrainEditData::getInstance ().setFloraScatter (value);
+	m_diagnostic->setText (QString ("Flora scatter %1%: every bush, rock and grass patch on the planet was re-placed (0% = the grid look, 100% = anywhere in its cell). Saved with the planet.").arg (value));
+}
+
+// ----------------------------------------------------------------------
+
+void TerrainEditWindow::onHeightLimitToggled (const bool on)
+{
+	//-- turning the height band on: start it around the ground under the cursor (10 m either way),
+	//-- so it isn't left at a range that misses the ground here
+	if (on && !m_updating)
+	{
+		float height = 0.0f;
+		if (TerrainEditData::getInstance ().sampleCursorHeight (height))
+		{
+			m_updating = true;
+			m_heightLow->setText (QString::number (floorf (height - 10.0f), 'f', 1));
+			m_heightHigh->setText (QString::number (ceilf (height + 10.0f), 'f', 1));
+			m_updating = false;
+			m_diagnostic->setText (QString ("Height band set to 10 m either side of the ground under the cursor (%1 m). Change the two boxes as needed.").arg (QString::number (height, 'f', 1)));
+		}
+	}
+	onLimitsChanged ();
+}
+
+// ----------------------------------------------------------------------
+
 void TerrainEditWindow::onCheckLastStroke ()
 {
 	m_diagnostic->setText ("Measuring...");
@@ -570,6 +1010,16 @@ void TerrainEditWindow::onTimer ()
 			m_diagnostic->setText (QString (message.c_str ()));
 	}
 
+	//-- object scatter: the template selected in the Tree Browser
+	{
+		const std::string selected = TerrainEditData::getScatterTemplate ();
+		const size_t slash = selected.find_last_of ('/');
+		const std::string fileName = slash == std::string::npos ? selected : selected.substr (slash + 1);   // a path can't wrap
+		const QString text = selected.empty () ? QString ("Object: none. Select a server template in the Tree Browser (ServerTemplates tab).") : QString ("Object: %1").arg (fileName.c_str ());
+		if (m_scatterTemplate->text () != text)
+			m_scatterTemplate->setText (text);
+	}
+
 	//-- status line
 	if (--m_heightCountdown <= 0)
 	{
@@ -595,6 +1045,25 @@ void TerrainEditWindow::onTimer ()
 					text = QString ("Ground height under cursor: %1 m").arg (QString::number (height, 'f', 1));
 					if (data.getTool () == TerrainEditData::T_water)
 						text += QString ("\nWater height: %1 m (%2 m above the ground here)").arg (QString::number (data.getLevelHeight (), 'f', 1)).arg (QString::number (data.getLevelHeight () - height, 'f', 1));
+					if (TerrainEditData::toolUsesLimits (data.getTool ()))
+					{
+						float groundHeight = 0.0f;
+						float slope = 0.0f;
+						int shader = 0;
+						if (data.sampleCursorGround (groundHeight, slope, shader))
+						{
+							const char * const shaderName = data.getShaderFamilyName (shader);
+							text += QString ("\nSlope: %1 deg, texture: %2 (#%3)").arg (QString::number (slope, 'f', 0)).arg (shaderName && *shaderName ? shaderName : "?").arg (shader);
+							if (data.getLimits ().any ())
+							{
+								const TerrainEditData::Limits & limits = data.getLimits ();
+								const bool passes = (!limits.m_slopeOn || (slope >= limits.m_slopeMin && slope <= limits.m_slopeMax))
+									&& (!limits.m_heightOn || (groundHeight >= limits.m_heightLow && groundHeight <= limits.m_heightHigh))
+									&& (limits.m_onTexture <= 0 || shader == limits.m_onTexture);
+								text += passes ? QString ("  - inside the limits") : QString ("  - outside the limits");
+							}
+						}
+					}
 					if (data.getTool () == TerrainEditData::T_flatten)
 						text += data.isFlattenHeightSet ()
 							? QString ("\nFlatten height: %1 m").arg (QString::number (data.getLevelHeight (), 'f', 1))
@@ -674,6 +1143,39 @@ void TerrainEditWindow::refreshFromData ()
 				if (selected >= 0)
 					m_paintFamily->setCurrentItem (selected);
 				m_paintFamily->setEnabled (!m_familyIds.empty ());
+
+				//-- flora scatter of this planet
+				{
+					const int scatter = data.getFloraScatter ();
+					m_floraScatter->setEnabled (scatter >= 0);
+					if (scatter >= 0)
+						m_floraScatter->setValue (scatter);
+				}
+
+				//-- Smart paint "only on texture": any, then the planet's textures
+				{
+					m_onTexture->clear ();
+					m_onTextureIds.clear ();
+					m_onTexture->insertItem ("(any texture)");
+					m_onTextureIds.push_back (0);
+					int chosen = 0;
+					for (int i = 0; i < count; ++i)
+					{
+						const int familyId = data.getShaderFamilyId (i);
+						const char * const familyName = data.getShaderFamilyName (familyId);
+						m_onTexture->insertItem (QString ("%1  (#%2)").arg (familyName && *familyName ? familyName : "unnamed").arg (familyId));
+						m_onTextureIds.push_back (familyId);
+						if (familyId == data.getLimits ().m_onTexture)
+							chosen = static_cast<int> (m_onTextureIds.size ()) - 1;
+					}
+					m_onTexture->setCurrentItem (chosen);
+					if (chosen == 0 && data.getLimits ().m_onTexture != 0)
+					{
+						TerrainEditData::Limits limits = data.getLimits ();
+						limits.m_onTexture = 0;   // that texture isn't on this planet
+						data.setLimits (limits);
+					}
+				}
 
 				//-- roughen patterns (the planet's fractals)
 				m_fractal->clear ();
@@ -756,6 +1258,7 @@ void TerrainEditWindow::refreshFromData ()
 	}
 	m_updating = false;
 
+	m_clipboardLabel->setText (QString (data.describeClipboard ().c_str ()));
 	m_shownRevision = data.getRevision ();
 }
 

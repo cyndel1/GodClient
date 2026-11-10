@@ -1740,6 +1740,18 @@ void ClientProceduralTerrainAppearance::removeClearNonCollidableFloraObject (con
 
 //-------------------------------------------------------------------
 
+void ClientProceduralTerrainAppearance::setFloraTileBorders (const float nonCollidableBorder, const float radialBorder, const float farRadialBorder)
+{
+	if (m_staticNonCollidableFloraManager && nonCollidableBorder >= 0.f)
+		m_staticNonCollidableFloraManager->setTileBorder (nonCollidableBorder);
+	if (m_dynamicNearFloraManager && radialBorder >= 0.f)
+		m_dynamicNearFloraManager->setTileBorder (radialBorder);
+	if (m_dynamicFarFloraManager && farRadialBorder >= 0.f)
+		m_dynamicFarFloraManager->setTileBorder (farRadialBorder);
+}
+
+//-------------------------------------------------------------------
+
 void ClientProceduralTerrainAppearance::addRunTimeWater (const TerrainGenerator::Layer* const layer, const int group)
 {
 	if (!layer || !m_localWaterManager || group == 0)

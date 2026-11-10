@@ -439,6 +439,16 @@ void ClientRadialFloraManager::maximumDistanceChanged ()
 
 //-------------------------------------------------------------------
 
+void ClientRadialFloraManager::setTileBorder (const float floraTileBorderIgnoreDistance)
+{
+	//-- nodes are placed once, at a random spot inside the tile minus this border on each side;
+	//-- a smaller border scatters them more. Rebuild the nodes with the new border.
+	m_floraTileBorderIgnoreDistance = std::max (0.f, std::min (floraTileBorderIgnoreDistance, m_floraTileSize * 0.5f - 0.05f));
+	maximumDistanceChanged ();
+}
+
+//-------------------------------------------------------------------
+
 void ClientRadialFloraManager::alter (float time)
 {
 	UNREF(time);
